@@ -71,21 +71,24 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
 
     async def _async_update_data(self) -> RomoSnapshot:
         """Refresh cloud metadata and keep the MQTT session healthy."""
+        await self._async_ensure_mqtt()
+
         try:
             device = await self.api.async_resolve_device(self.device_sn)
         except DjiRomoApiError as err:
             if "token" in str(err).lower():
                 raise ConfigEntryAuthFailed(str(err)) from err
-            raise UpdateFailed(str(err)) from err
-
-        self.device_info_payload = device
-        self.device_name = (
-            self.entry.options.get(CONF_DEVICE_NAME)
-            or device.get("name")
-            or self.entry.data[CONF_DEVICE_NAME]
-        )
-
-        await self._async_ensure_mqtt()
+            _LOGGER.debug(
+                "Skipping DJI Romo device metadata refresh because homes lookup failed: %s",
+                err,
+            )
+        else:
+            self.device_info_payload = device
+            self.device_name = (
+                self.entry.options.get(CONF_DEVICE_NAME)
+                or device.get("name")
+                or self.entry.data[CONF_DEVICE_NAME]
+            )
 
         if self.last_update_success and self.data is not None:
             return self.data
