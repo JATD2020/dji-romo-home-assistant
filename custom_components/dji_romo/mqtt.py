@@ -30,9 +30,8 @@ class DjiRomoMqttClient:
         self._on_message = on_message
         self._client: mqtt.Client | None = None
         self._connected = asyncio.Event()
-        self._current_credentials: tuple[str, int, str, str] | None = None
+        self._current_credentials: tuple[str, int, str, str, str] | None = None
         self._subscriptions: tuple[str, ...] = ()
-        self._client_id = "ha_dji_romo"
 
     async def async_connect(
         self,
@@ -43,6 +42,7 @@ class DjiRomoMqttClient:
         new_credentials = (
             credentials.domain,
             credentials.port,
+            credentials.client_id,
             credentials.username,
             credentials.password,
         )
@@ -58,7 +58,7 @@ class DjiRomoMqttClient:
 
         client = mqtt.Client(
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-            client_id=self._client_id,
+            client_id=credentials.client_id,
             protocol=mqtt.MQTTv311,
         )
         client.enable_logger(_LOGGER)

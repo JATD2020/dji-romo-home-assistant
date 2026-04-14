@@ -24,6 +24,7 @@ class DjiMqttCredentials:
 
     domain: str
     port: int
+    client_id: str
     username: str
     password: str
     fetched_at: datetime
@@ -55,6 +56,7 @@ class DjiRomoApiClient:
         return DjiMqttCredentials(
             domain=data["mqtt_domain"],
             port=int(data["mqtt_port"]),
+            client_id=data["client_id"],
             username=data["user_uuid"],
             password=data["user_token"],
             fetched_at=datetime.now(UTC),
