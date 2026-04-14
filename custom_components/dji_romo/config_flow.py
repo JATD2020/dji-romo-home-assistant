@@ -48,6 +48,8 @@ class DjiRomoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 data = await _validate_user_input(self.hass, user_input)
             except DjiRomoApiError:
                 errors["base"] = "cannot_connect"
+            except CannotDiscoverDeviceError:
+                errors["base"] = "cannot_discover_device"
             else:
                 await self.async_set_unique_id(data[CONF_DEVICE_SN])
                 self._abort_if_unique_id_configured()
@@ -190,9 +192,33 @@ async def _validate_user_input(
         user_input[CONF_USER_TOKEN],
         locale=locale,
     )
-    device = await client.async_resolve_device(user_input.get(CONF_DEVICE_SN) or None)
-    device_sn = device["sn"]
-    device_name = user_input.get(CONF_NAME) or device.get("name") or f"Romo {device_sn}"
+    # Validate the token using the endpoint we know is working.
+    await client.async_get_mqtt_credentials()
+
+    requested_sn = user_input.get(CONF_DEVICE_SN) or None
+    device_name = user_input.get(CONF_NAME)
+    device_sn = requested_sn
+
+    if requested_sn is not None:
+        try:
+            device = await client.async_resolve_device(requested_sn)
+        except DjiRomoApiError:
+            # Some accounts/regions do not expose a usable homes endpoint yet.
+            # If the user already knows the serial number, allow setup to continue.
+            device = {
+                "sn": requested_sn,
+                "name": device_name or f"Romo {requested_sn}",
+            }
+        device_sn = device["sn"]
+        device_name = device_name or device.get("name") or f"Romo {device_sn}"
+    else:
+        try:
+            device = await client.async_resolve_device(None)
+        except DjiRomoApiError as err:
+            raise CannotDiscoverDeviceError from err
+        device_sn = device["sn"]
+        device_name = device_name or device.get("name") or f"Romo {device_sn}"
+
     return {
         CONF_USER_TOKEN: user_input[CONF_USER_TOKEN],
         CONF_DEVICE_SN: device_sn,
@@ -203,3 +229,7 @@ async def _validate_user_input(
         CONF_SUBSCRIPTION_TOPICS: DEFAULT_SUBSCRIPTION_TOPICS,
         CONF_COMMAND_MAPPING: json.loads(DEFAULT_COMMAND_MAPPING_JSON),
     }
+
+
+class CannotDiscoverDeviceError(Exception):
+    """Raised when token validation works but serial discovery does not."""

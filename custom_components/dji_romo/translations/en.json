@@ -13,7 +13,8 @@
       }
     },
     "error": {
-      "cannot_connect": "Could not connect to DJI Home."
+      "cannot_connect": "Could not connect to DJI Home.",
+      "cannot_discover_device": "Token is valid, but the robot could not be auto-discovered. Enter the device serial number manually."
     }
   },
   "options": {
