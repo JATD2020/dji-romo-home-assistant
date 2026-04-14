@@ -2,6 +2,8 @@
 
 Custom Home Assistant integration for the DJI Romo robot vacuum. It is designed as a HACS-compatible custom component and builds on the credential extraction work documented here:
 
+![DJI Romo](dji.png)
+
 - [xn0tsa/dji-home-credential-extractor](https://github.com/xn0tsa/dji-home-credential-extractor)
 
 ## What works today
