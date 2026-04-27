@@ -3,19 +3,33 @@
     "step": {
       "user": {
         "title": "Connect DJI Romo",
-        "description": "Use the user token extracted from the DJI Home app.",
+        "description": "Paste the full `.env` or `dji_credentials.txt` output from the DJI Home credential extractor, or enter the DJI user token manually.",
         "data": {
+          "credentials_text": "Extractor output (.env or dji_credentials.txt)",
           "user_token": "DJI user token",
           "device_sn": "Device serial number",
           "name": "Display name",
           "locale": "Locale"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Refresh DJI Romo credentials",
+        "description": "Paste fresh extractor output or enter a new DJI user token.",
+        "data": {
+          "credentials_text": "Extractor output (.env or dji_credentials.txt)",
+          "user_token": "DJI user token"
         }
       }
     },
     "error": {
       "cannot_connect": "Could not connect to DJI Home.",
       "cannot_discover_device": "Token is valid, but the robot could not be auto-discovered. Enter the device serial number manually.",
-      "invalid_json": "Invalid JSON."
+      "invalid_json": "Invalid JSON.",
+      "missing_token": "Paste extractor output or enter a DJI user token.",
+      "wrong_device": "These credentials are for a different DJI Romo."
+    },
+    "abort": {
+      "reauth_successful": "DJI Romo credentials updated."
     }
   },
   "options": {
@@ -35,6 +49,12 @@
     },
     "error": {
       "invalid_json": "Invalid JSON."
+    }
+  },
+  "issues": {
+    "auth_failed": {
+      "title": "DJI Romo authentication failed",
+      "description": "The DJI Home user token is invalid or expired. Extract fresh credentials from the DJI Home app and reconfigure the DJI Romo integration. You can paste the full `.env` or `dji_credentials.txt` output. Error: {error}"
     }
   }
 }

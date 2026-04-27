@@ -10,9 +10,22 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import ATTR_LAST_TOPIC, ATTR_LAST_UPDATED, ATTR_RAW_STATE, ATTR_SELECTED_TOPIC, DOMAIN
+from .const import (
+    ATTR_LAST_TOPIC,
+    ATTR_LAST_UPDATED,
+    ATTR_RAW_STATE,
+    ATTR_SELECTED_TOPIC,
+    CONF_ROOM_FAN_SPEED,
+    DOMAIN,
+)
 from .coordinator import DjiRomoCoordinator
 from .entity import DjiRomoCoordinatorEntity
+
+FAN_SPEED_OPTIONS = {
+    1: "Stil",
+    2: "Standaard",
+    3: "Max",
+}
 
 
 async def async_setup_entry(
@@ -37,7 +50,9 @@ class DjiRomoVacuum(DjiRomoCoordinatorEntity, StateVacuumEntity):
         | VacuumEntityFeature.RETURN_HOME
         | VacuumEntityFeature.LOCATE
         | VacuumEntityFeature.SEND_COMMAND
+        | VacuumEntityFeature.FAN_SPEED
     )
+    _attr_fan_speed_list = list(FAN_SPEED_OPTIONS.values())
 
     def __init__(self, coordinator: DjiRomoCoordinator) -> None:
         super().__init__(coordinator)
@@ -51,7 +66,11 @@ class DjiRomoVacuum(DjiRomoCoordinatorEntity, StateVacuumEntity):
     @property
     def fan_speed(self) -> str | None:
         """Return best-effort fan/suction mode."""
-        return self.coordinator.data.fan_speed
+        value = (
+            self.coordinator.data.fan_speed
+            or self.coordinator.room_cleaning_options[CONF_ROOM_FAN_SPEED]
+        )
+        return FAN_SPEED_OPTIONS.get(value)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -69,11 +88,11 @@ class DjiRomoVacuum(DjiRomoCoordinatorEntity, StateVacuumEntity):
         attrs[ATTR_RAW_STATE] = self.coordinator.data.raw_state
         return attrs
 
-    async def async_start(self) -> None:
+    async def async_start(self, **kwargs: Any) -> None:
         """Start cleaning."""
         await self.coordinator.async_send_named_command("start")
 
-    async def async_pause(self) -> None:
+    async def async_pause(self, **kwargs: Any) -> None:
         """Pause cleaning."""
         await self.coordinator.async_send_named_command("pause")
 
@@ -88,6 +107,16 @@ class DjiRomoVacuum(DjiRomoCoordinatorEntity, StateVacuumEntity):
     async def async_locate(self, **kwargs: Any) -> None:
         """Make the robot announce its location."""
         await self.coordinator.async_send_named_command("locate")
+
+    async def async_set_fan_speed(self, fan_speed: str, **kwargs: Any) -> None:
+        """Set the suction power used by Home Assistant room clean buttons."""
+        for value, name in FAN_SPEED_OPTIONS.items():
+            if name == fan_speed:
+                await self.coordinator.async_set_room_cleaning_option(
+                    CONF_ROOM_FAN_SPEED,
+                    value,
+                )
+                return
 
     async def async_send_command(
         self,

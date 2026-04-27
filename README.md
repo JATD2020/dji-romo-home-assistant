@@ -9,25 +9,17 @@ Custom Home Assistant integration for the DJI Romo robot vacuum. It is designed 
 ## What works today
 
 - Config flow in Home Assistant
-- Validates a `DJI_USER_TOKEN` against the DJI Home cloud API
+- Validates DJI Home credentials against the DJI Home cloud API
 - Resolves your Romo serial number from the account if you do not enter it manually
 - Fetches temporary MQTT credentials automatically
 - Connects to DJI's TLS MQTT broker
 - Creates:
   - 1 vacuum entity
-  - 3 sensors (`battery`, `status`, `last_update`)
-- Supports raw command publishing through `vacuum.send_command`
-- Includes configurable topic patterns and command mappings in the options flow
-
-## Current limitation
-
-The authentication and telemetry side is reasonably clear from the reverse-engineered material, but the exact Romo service methods for `start`, `pause`, `dock`, `locate`, and similar actions are still partly inferred.
-
-That means:
-
-- the integration includes sensible default command mappings
-- those defaults may need adjustment for your specific Romo firmware/app version
-- if a standard button in Home Assistant does not work, `vacuum.send_command` still lets you test raw methods without changing code
+  - sensors for battery, firmware, dock state, tanks, consumables, cleaning solution, and settings
+  - buttons for DJI Home cleaning shortcuts/presets
+- Supports start, pause, stop, return to dock, and preset cleaning through DJI Home REST endpoints
+- Supports raw MQTT command publishing through `vacuum.send_command`
+- Shows a Home Assistant repair if the DJI Home token expires
 
 ## Install through HACS
 
@@ -37,38 +29,29 @@ That means:
 4. Restart Home Assistant.
 5. Add the integration from `Settings -> Devices & Services`.
 
-## Getting the token
+## Getting credentials
 
 Use the extractor project to retrieve the token and serial number:
 
 1. Follow the instructions in [dji-home-credential-extractor](https://github.com/xn0tsa/dji-home-credential-extractor)
-2. Copy the `DJI_USER_TOKEN`
-3. Optionally copy `DJI_DEVICE_SN`
-4. Add the Home Assistant integration
+2. Add the Home Assistant integration
+3. Paste the full `.env` or `dji_credentials.txt` output into the credentials field
+
+The config flow will parse:
+
+- `DJI_USER_TOKEN`
+- `DJI_DEVICE_SN`
+- `DJI_API_URL`
+- `DJI_LOCALE`
+
+You can still enter the token and serial manually if you prefer.
 
 ## Recommended first setup
 
 1. Add the integration with only the token first.
 2. Let it auto-discover the Romo serial number.
 3. Confirm that battery/status telemetry starts updating.
-4. Test a raw command from Developer Tools.
-
-Example raw command:
-
-```yaml
-action: vacuum.send_command
-target:
-  entity_id: vacuum.romo
-data:
-  command: start_clean
-  params: {}
-```
-
-If that works, the default mapping is already close enough. If it does not:
-
-1. Open the integration options.
-2. Adjust the command mapping JSON.
-3. Reload the integration.
+4. Test `vacuum.start`, `vacuum.pause`, `vacuum.return_to_base`, or one of the preset buttons.
 
 ## Default MQTT topics
 
@@ -103,14 +86,10 @@ Commands:
 }
 ```
 
-## Reverse-engineering next step
+## Authentication notes
 
-The fastest way to make control fully reliable is to capture the exact MQTT command payloads sent by the DJI Home app while you tap:
+The permanent-looking DJI Home user token is extracted from the Android app. The integration uses it to request short-lived MQTT credentials automatically. If DJI invalidates the user token, Home Assistant will show a repair issue and start reauthentication; paste fresh extractor output to recover.
 
-- start
-- pause
-- stop
-- return to dock
-- locate/find robot
+## Local control
 
-Once those method names and envelope fields are confirmed, the defaults in this integration can be tightened up.
+The robot is visible on the LAN via mDNS, but current testing found no open TCP ports on the robot. Control currently uses DJI cloud REST for commands and DJI cloud MQTT for push telemetry.

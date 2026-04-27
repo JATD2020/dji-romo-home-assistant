@@ -4,12 +4,12 @@
   "codeowners": [],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/xn0tsa/dji-home-credential-extractor",
+  "documentation": "https://github.com/dof250/dji-romo-home-assistant",
   "integration_type": "device",
   "iot_class": "cloud_push",
-  "issue_tracker": "https://github.com/xn0tsa/dji-home-credential-extractor/issues",
+  "issue_tracker": "https://github.com/dof250/dji-romo-home-assistant/issues",
   "requirements": [
     "paho-mqtt>=2.1.0"
   ],
-  "version": "0.1.5"
+  "version": "0.3.0"
 }

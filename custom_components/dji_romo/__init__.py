@@ -9,6 +9,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .client import DjiRomoApiClient
 from .const import (
     CONF_API_URL,
+    CONF_DEVICE_SN,
     CONF_LOCALE,
     CONF_USER_TOKEN,
     DOMAIN,
@@ -24,6 +25,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     api = DjiRomoApiClient(
         session,
         entry.data[CONF_USER_TOKEN],
+        device_sn=entry.data[CONF_DEVICE_SN],
         api_url=entry.options.get(CONF_API_URL, entry.data[CONF_API_URL]),
         locale=entry.options.get(CONF_LOCALE, entry.data[CONF_LOCALE]),
     )
@@ -32,7 +34,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
     return True
 
 
@@ -47,5 +48,4 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Reload the config entry."""
-    await async_unload_entry(hass, entry)
-    await async_setup_entry(hass, entry)
+    await hass.config_entries.async_reload(entry.entry_id)

@@ -4,7 +4,10 @@
   "country": "NL",
   "domains": [
     "vacuum",
-    "sensor"
+    "sensor",
+    "button",
+    "select",
+    "number"
   ],
   "homeassistant": "2025.1.0",
   "render_readme": true
