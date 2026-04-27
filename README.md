@@ -9,17 +9,11 @@ Custom Home Assistant integration for the DJI Romo robot vacuum. It is designed 
 ## What works today
 
 - Config flow in Home Assistant
-- Validates DJI Home credentials against the DJI Home cloud API
-- Resolves your Romo serial number from the account if you do not enter it manually
-- Fetches temporary MQTT credentials automatically
-- Connects to DJI's TLS MQTT broker
 - Creates:
   - 1 vacuum entity
   - sensors for battery, firmware, dock state, tanks, consumables, cleaning solution, and settings
   - buttons for DJI Home cleaning shortcuts/presets
 - Supports start, pause, stop, return to dock, and preset cleaning through DJI Home REST endpoints
-- Supports raw MQTT command publishing through `vacuum.send_command`
-- Shows a Home Assistant repair if the DJI Home token expires
 
 ## Install through HACS
 
