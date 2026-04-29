@@ -17,8 +17,8 @@ from .coordinator import DjiRomoCoordinator
 from .entity import DjiRomoCoordinatorEntity
 
 CLEAN_MODE_LABELS = {
-    0: "Vacuum and Mop",
-    1: "Vacuum then Mop",
+    0: "Vacuum then Mop",
+    1: "Vacuum and Mop",
     2: "Vacuum Only",
     3: "Mop Only",
     4: "Super clean",
