@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable
 from typing import Any
 
@@ -17,26 +18,29 @@ from .coordinator import DjiRomoCoordinator
 from .entity import DjiRomoCoordinatorEntity
 
 ROOM_LABELS = {
-    1: "Bedroom",
-    2: "Guest Room",
-    3: "Kitchen",
+    1: "Kitchen",
+    2: "Toilet",
+    3: "Living Room",
     4: "Dining Room",
-    5: "Study",
-    6: "Living Room",
-    7: "Hallway",
-    8: "Storage",
+    5: "Master Bedroom",
+    6: "Bedroom",
+    7: "Study",
+    8: "Children's Room",
     9: "Balcony",
-    10: "Laundry Room",
-    11: "Closet",
+    10: "Bathroom",
+    11: "Foyer",
     12: "Office",
-    13: "Entrance",
-    14: "Bathroom",
-    15: "Kids Room",
+    13: "Corridor",
+    14: "Hallway",
+    15: "Other",
 }
 
 PLAN_NAME_TRANSLATIONS = {
     "default_plan_name_quick": "Detailed Single Vacuum",
-    "精细单扫": "Detailed Single Vacuum",
+    "精细单扫": "Fine Vacuum",
+    "日常清洁": "Daily Cleaning",
+    "深度扫除": "Deep Cleaning",
+    "消毒杀菌": "Floor Deodorization",
 }
 
 DOCK_ACTIONS = (
@@ -75,8 +79,8 @@ async def async_setup_entry(
         for action in DOCK_ACTIONS
     )
     entities.extend(
-        DjiRomoRoomButton(coordinator, room, room_map)
-        for room, room_map in _room_configs_from_shortcuts(shortcuts)
+        DjiRomoRoomButton(coordinator, room, room_map, duplicate_labels)
+        for room, room_map, duplicate_labels in _room_configs_from_shortcuts(shortcuts)
     )
     async_add_entities(entities)
 
@@ -130,11 +134,12 @@ class DjiRomoRoomButton(DjiRomoCoordinatorEntity, ButtonEntity):
         coordinator: DjiRomoCoordinator,
         room_config: dict[str, Any],
         room_map: dict[str, Any],
+        duplicate_labels: set[int],
     ) -> None:
         super().__init__(coordinator)
         self._room_config = room_config
         self._room_map = room_map
-        self._room_name = _room_name(room_config)
+        self._room_name = _room_name(room_config, duplicate_labels)
         self._attr_name = f"Clean {self._room_name}"
         self._attr_unique_id = (
             f"{coordinator.device_sn}_room_{room_config.get('poly_index')}"
@@ -218,7 +223,7 @@ def _shortcut_name(shortcut: dict[str, Any], index: int) -> str:
 
 def _room_configs_from_shortcuts(
     shortcuts: list[dict[str, Any]],
-) -> Iterable[tuple[dict[str, Any], dict[str, Any]]]:
+) -> Iterable[tuple[dict[str, Any], dict[str, Any], set[int]]]:
     """Build one room-clean button per room from a suitable shortcut template."""
     template = _room_template_shortcut(shortcuts)
     if not template:
@@ -230,7 +235,7 @@ def _room_configs_from_shortcuts(
         for config in template.get("plan_area_configs", [])
         if config.get("poly_index") is not None
     }
-    result = []
+    all_configs: list[dict[str, Any]] = []
     for index, room in enumerate(sorted(rooms, key=_room_sort_key), start=1):
         poly_index = room.get("poly_index")
         config = dict(configs.get(poly_index) or room)
@@ -240,8 +245,13 @@ def _room_configs_from_shortcuts(
         config.setdefault("water_level", 2)
         config.setdefault("clean_num", 1)
         config.setdefault("clean_speed", 2)
-        result.append((config, room_map))
-    return result
+        all_configs.append(config)
+
+    # Find label IDs that appear more than once so _room_name can number them.
+    label_counts = Counter(_effective_label_id(c) for c in all_configs)
+    duplicate_labels = {label for label, count in label_counts.items() if count > 1}
+
+    return [(config, room_map, duplicate_labels) for config in all_configs]
 
 
 def _room_template_shortcut(shortcuts: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -259,12 +269,28 @@ def _room_template_shortcut(shortcuts: list[dict[str, Any]]) -> dict[str, Any] |
 def _room_sort_key(room: dict[str, Any]) -> tuple[int, int]:
     order_id = room.get("order_id")
     return (
-        int(order_id) if isinstance(order_id, int) and order_id > 0 else 999,
+        int(order_id) if isinstance(order_id, int) and order_id >= 0 else 999,
         int(room.get("poly_index") or 0),
     )
 
 
-def _room_name(room_config: dict[str, Any]) -> str:
+def _effective_label_id(room_config: dict[str, Any]) -> int:
+    """Return the label ID used for room-name lookup."""
+    label = room_config.get("user_label")
+    try:
+        label_id = int(label)
+    except (TypeError, ValueError):
+        label_id = 0
+    if label_id == -1:
+        poly_label = room_config.get("poly_label")
+        try:
+            label_id = int(poly_label)
+        except (TypeError, ValueError):
+            label_id = 0
+    return label_id
+
+
+def _room_name(room_config: dict[str, Any], duplicate_labels: set[int]) -> str:
     custom_name = str(room_config.get("custom_name") or "").strip()
     if custom_name:
         return custom_name
@@ -273,4 +299,22 @@ def _room_name(room_config: dict[str, Any]) -> str:
         label_id = int(label)
     except (TypeError, ValueError):
         label_id = 0
-    return ROOM_LABELS.get(label_id, f"Room {room_config.get('poly_index')}")
+    # user_label=-1 means DJI assigned the label automatically; poly_label
+    # holds the same room-type ID as user_label (same ROOM_LABELS numbering).
+    if label_id == -1:
+        poly_label = room_config.get("poly_label")
+        try:
+            label_id = int(poly_label)
+        except (TypeError, ValueError):
+            label_id = 0
+    base_name = ROOM_LABELS.get(label_id, f"Room {room_config.get('poly_index')}")
+    # When several rooms share the same label (e.g. two Bathrooms), number all
+    # of them ("Bathroom 1", "Bathroom 2") matching what the DJI app shows.
+    if label_id in duplicate_labels:
+        name_index = room_config.get("poly_name_index")
+        try:
+            name_index = int(name_index)
+        except (TypeError, ValueError):
+            name_index = 0
+        return f"{base_name} {name_index + 1}"
+    return base_name
