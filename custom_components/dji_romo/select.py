@@ -33,8 +33,8 @@ SELECTS: tuple[DjiRomoSelectDescription, ...] = (
         name="Room Cleaning Mode",
         icon="mdi:robot-vacuum",
         option_map={
-            "Vacuum and Mop": 0,
-            "Vacuum then Mop": 1,
+            "Vacuum then Mop": 0,
+            "Vacuum and Mop": 1,
             "Vacuum Only": 2,
             "Mop Only": 3,
             "Super clean": 4,
