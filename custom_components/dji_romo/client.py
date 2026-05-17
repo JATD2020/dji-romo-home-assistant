@@ -350,7 +350,7 @@ class DjiRomoApiClient:
             raise DjiRomoApiError(f"Failed to call DJI Romo device API: {err}") from err
 
         result = payload.get("result", {})
-        result_code = result.get("code")
+        result_code = _coerce_result_code(result.get("code"))
         allowed = allowed_result_codes or {0}
         if result_code not in allowed:
             message = result.get("message") or "Unknown DJI Romo device API error"
@@ -383,7 +383,7 @@ class DjiRomoApiClient:
             raise DjiRomoApiError(f"Failed to call DJI Home API: {err}") from err
 
         result = payload.get("result", {})
-        if result.get("code") != 0:
+        if _coerce_result_code(result.get("code")) != 0:
             message = result.get("message") or "Unknown DJI Home API error"
             if "token" in message.lower() or "auth" in message.lower():
                 raise DjiRomoAuthError(message)
@@ -404,3 +404,13 @@ class DjiRomoApiClient:
         if include_json:
             headers["Content-Type"] = "application/json"
         return headers
+
+
+def _coerce_result_code(value: Any) -> int | None:
+    """Return DJI result codes as integers when possible."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

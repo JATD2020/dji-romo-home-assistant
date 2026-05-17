@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Iterable
+import logging
 from typing import Any
 
 from homeassistant.components.button import ButtonEntity
@@ -15,7 +16,10 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .const import DOMAIN
 from .coordinator import DjiRomoCoordinator
+from .client import DjiRomoApiError, DjiRomoAuthError
 from .entity import DjiRomoCoordinatorEntity
+
+_LOGGER = logging.getLogger(__name__)
 
 ROOM_LABELS = {
     1: "Kitchen",
@@ -69,7 +73,14 @@ async def async_setup_entry(
 ) -> None:
     """Set up Romo shortcut buttons."""
     coordinator: DjiRomoCoordinator = hass.data[DOMAIN][entry.entry_id]
-    shortcuts = await coordinator.api.async_get_shortcuts()
+    try:
+        shortcuts = await coordinator.api.async_get_shortcuts()
+    except DjiRomoAuthError:
+        raise
+    except DjiRomoApiError as err:
+        _LOGGER.warning("Failed to fetch DJI Romo shortcuts: %s", err)
+        shortcuts = []
+
     entities: list[ButtonEntity] = [
         DjiRomoShortcutButton(coordinator, shortcut, index)
         for index, shortcut in enumerate(shortcuts, start=1)

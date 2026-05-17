@@ -13,7 +13,6 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from .const import (
     ATTR_LAST_TOPIC,
     ATTR_LAST_UPDATED,
-    ATTR_RAW_STATE,
     ATTR_SELECTED_TOPIC,
     CONF_ROOM_FAN_SPEED,
     DOMAIN,
@@ -74,7 +73,7 @@ class DjiRomoVacuum(DjiRomoCoordinatorEntity, StateVacuumEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Expose parsed and raw payload fragments for debugging."""
+        """Expose parsed state details without storing full raw MQTT payloads."""
         attrs = dict(super().extra_state_attributes)
         if self.coordinator.data.cleaned_area is not None:
             attrs["cleaned_area"] = self.coordinator.data.cleaned_area
@@ -85,7 +84,6 @@ class DjiRomoVacuum(DjiRomoCoordinatorEntity, StateVacuumEntity):
             attrs[ATTR_LAST_TOPIC] = self.coordinator.data.selected_topic
         if self.coordinator.data.last_updated is not None:
             attrs[ATTR_LAST_UPDATED] = self.coordinator.data.last_updated.isoformat()
-        attrs[ATTR_RAW_STATE] = self.coordinator.data.raw_state
         return attrs
 
     async def async_start(self, **kwargs: Any) -> None:

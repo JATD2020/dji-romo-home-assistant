@@ -195,7 +195,10 @@ class DjiRomoOptionsFlow(config_entries.OptionsFlow):
                     ): str,
                     vol.Required(
                         CONF_API_URL,
-                        default=current.get(CONF_API_URL, DEFAULT_API_URL),
+                        default=current.get(
+                            CONF_API_URL,
+                            self._config_entry.data.get(CONF_API_URL, DEFAULT_API_URL),
+                        ),
                     ): str,
                     vol.Required(
                         CONF_LOCALE,
