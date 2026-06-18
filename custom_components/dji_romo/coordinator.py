@@ -29,10 +29,12 @@ from .const import (
     CONF_ROOM_FAN_SPEED,
     CONF_ROOM_WATER_LEVEL,
     CONF_SUBSCRIPTION_TOPICS,
+    CLOUD_REFRESH_FAILURE_LIMIT,
     DEFAULT_COMMAND_MAPPING,
     DOMAIN,
     MQTT_CREDENTIAL_ASSUMED_LIFETIME,
     MQTT_CREDENTIAL_REFRESH_MARGIN,
+    MQTT_STALE_AFTER,
 )
 from .mqtt import DjiRomoMqttClient
 
@@ -110,10 +112,11 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         self._pending_activity_count = 0
         self._held_activity: str | None = None
         self._activity_hold_until: datetime | None = None
+        self._cloud_refresh_failures = 0
 
     async def _async_update_data(self) -> RomoSnapshot:
         """Refresh cloud metadata and keep the MQTT session healthy."""
-        await self._async_ensure_mqtt()
+        recovered_stale_mqtt = await self._async_ensure_mqtt()
         self.device_name = (
             self.entry.options.get(CONF_DEVICE_NAME)
             or self.entry.data[CONF_DEVICE_NAME]
@@ -121,6 +124,11 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
 
         snapshot = deepcopy(self.data) if self.data else RomoSnapshot()
         await self._async_refresh_cloud_data(snapshot)
+
+        if recovered_stale_mqtt:
+            raise UpdateFailed(
+                "DJI Romo MQTT stream stalled; reconnected and waiting for fresh state."
+            )
 
         if self.last_update_success and self.data is not None:
             return snapshot
@@ -154,9 +162,21 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
                 f"DJI Home authentication failed: {err}"
             ) from err
         except DjiRomoApiError as err:
-            _LOGGER.warning("Failed to refresh DJI Romo cloud details: %s", err)
+            self._cloud_refresh_failures += 1
+            if self._cloud_refresh_failures >= CLOUD_REFRESH_FAILURE_LIMIT:
+                raise UpdateFailed(
+                    "Failed to refresh DJI Romo cloud details "
+                    f"{self._cloud_refresh_failures} times in a row: {err}"
+                ) from err
+            _LOGGER.warning(
+                "Failed to refresh DJI Romo cloud details (%s/%s): %s",
+                self._cloud_refresh_failures,
+                CLOUD_REFRESH_FAILURE_LIMIT,
+                err,
+            )
             return
 
+        self._cloud_refresh_failures = 0
         self._async_delete_auth_repair_issue()
         snapshot.cloud_data = {
             "properties": properties,
@@ -344,8 +364,18 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         )
         return [topic.format(device_sn=self.device_sn) for topic in topics]
 
-    async def _async_ensure_mqtt(self) -> None:
+    async def _async_ensure_mqtt(self) -> bool:
         """Refresh MQTT credentials before expiry and maintain the connection."""
+        recovered_stale = False
+        if stale_since := self._mqtt.stale_since(MQTT_STALE_AFTER):
+            recovered_stale = True
+            _LOGGER.warning(
+                "DJI Romo MQTT stream has not received messages since %s; reconnecting",
+                stale_since.isoformat(),
+            )
+            await self._mqtt.async_disconnect()
+            self._mqtt_credentials = None
+
         if self._mqtt_credentials is None or self._mqtt_credentials.fetched_at <= (
             datetime.now(UTC) - MQTT_CREDENTIAL_ASSUMED_LIFETIME + MQTT_CREDENTIAL_REFRESH_MARGIN
         ):
@@ -364,6 +394,7 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             self._mqtt_credentials,
             self.subscription_topics,
         )
+        return recovered_stale
 
     async def _async_publish(self, payload: dict[str, Any]) -> None:
         """Publish a payload after ensuring MQTT connectivity."""

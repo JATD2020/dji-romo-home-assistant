@@ -42,6 +42,8 @@ PLATFORMS = ["vacuum", "sensor", "button", "select", "number"]
 COORDINATOR_REFRESH_INTERVAL = timedelta(minutes=30)
 MQTT_CREDENTIAL_REFRESH_MARGIN = timedelta(minutes=15)
 MQTT_CREDENTIAL_ASSUMED_LIFETIME = timedelta(hours=4)
+MQTT_STALE_AFTER = timedelta(minutes=10)
+CLOUD_REFRESH_FAILURE_LIMIT = 3
 
 ATTR_LAST_TOPIC = "last_topic"
 ATTR_LAST_UPDATED = "last_updated"

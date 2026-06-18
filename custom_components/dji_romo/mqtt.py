@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 import json
 import logging
 import ssl
@@ -32,6 +33,8 @@ class DjiRomoMqttClient:
         self._connected = asyncio.Event()
         self._current_credentials: tuple[str, int, str, str, str] | None = None
         self._subscriptions: tuple[str, ...] = ()
+        self._last_connect_at: datetime | None = None
+        self._last_message_at: datetime | None = None
 
     async def async_connect(
         self,
@@ -55,6 +58,7 @@ class DjiRomoMqttClient:
             return
 
         await self.async_disconnect()
+        ssl_context = await self._loop.run_in_executor(None, ssl.create_default_context)
 
         client = mqtt.Client(
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
@@ -63,7 +67,7 @@ class DjiRomoMqttClient:
         )
         client.enable_logger(_LOGGER)
         client.username_pw_set(credentials.username, credentials.password)
-        client.tls_set_context(ssl.create_default_context())
+        client.tls_set_context(ssl_context)
         client.on_connect = self._on_connect
         client.on_disconnect = self._on_disconnect
         client.on_message = self._on_paho_message
@@ -88,9 +92,28 @@ class DjiRomoMqttClient:
         self._connected.clear()
         self._current_credentials = None
         self._subscriptions = ()
+        self._last_connect_at = None
+        self._last_message_at = None
 
         await self._loop.run_in_executor(None, client.disconnect)
         await self._loop.run_in_executor(None, client.loop_stop)
+
+    @property
+    def last_message_at(self) -> datetime | None:
+        """Return when the last MQTT message was received."""
+        return self._last_message_at
+
+    def stale_since(self, max_age: timedelta) -> datetime | None:
+        """Return the stale timestamp when the MQTT stream stopped updating."""
+        if self._client is None or not self._connected.is_set():
+            return None
+
+        reference = self._last_message_at or self._last_connect_at
+        if reference is None:
+            return None
+        if datetime.now(UTC) - reference > max_age:
+            return reference
+        return None
 
     async def async_publish(self, topic: str, payload: dict[str, Any]) -> None:
         """Publish a command payload."""
@@ -125,6 +148,7 @@ class DjiRomoMqttClient:
             return
 
         _LOGGER.debug("DJI Romo MQTT connected")
+        self._last_connect_at = datetime.now(UTC)
         for topic in self._subscriptions:
             client.subscribe(topic, qos=1)
         self._loop.call_soon_threadsafe(self._connected.set)
@@ -154,6 +178,7 @@ class DjiRomoMqttClient:
         except json.JSONDecodeError:
             payload = raw_payload
 
+        self._last_message_at = datetime.now(UTC)
         self._loop.call_soon_threadsafe(
             self._on_message,
             message.topic,
