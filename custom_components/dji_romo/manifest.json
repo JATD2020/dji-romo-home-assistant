@@ -1,15 +1,17 @@
 {
   "domain": "dji_romo",
   "name": "DJI Romo",
-  "codeowners": [],
+  "codeowners": ["@JATD2020"],
   "config_flow": true,
   "dependencies": [],
   "documentation": "https://github.com/JATD2020/dji-romo-home-assistant",
   "integration_type": "device",
   "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/JATD2020/dji-romo-home-assistant/issues",
+  "loggers": ["paho"],
   "requirements": [
-    "paho-mqtt>=2.1.0"
+    "paho-mqtt>=2.1.0",
+    "cryptography>=42.0.0"
   ],
-  "version": "0.3.5"
+  "version": "0.7.0"
 }

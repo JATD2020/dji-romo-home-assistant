@@ -17,6 +17,11 @@ from .client import DjiMqttCredentials
 _LOGGER = logging.getLogger(__name__)
 
 MessageCallback = Callable[[str, Any], None]
+ConnectionLostCallback = Callable[[], None]
+
+
+class DjiRomoMqttError(Exception):
+    """Raised when the MQTT session cannot be established."""
 
 
 class DjiRomoMqttClient:
@@ -26,13 +31,19 @@ class DjiRomoMqttClient:
         self,
         loop: asyncio.AbstractEventLoop,
         on_message: MessageCallback,
+        on_connection_lost: ConnectionLostCallback | None = None,
     ) -> None:
         self._loop = loop
         self._on_message = on_message
+        self._on_connection_lost = on_connection_lost
         self._client: mqtt.Client | None = None
         self._connected = asyncio.Event()
         self._current_credentials: tuple[str, int, str, str, str] | None = None
         self._subscriptions: tuple[str, ...] = ()
+        # Set while we tear the session down on purpose, so the disconnect
+        # callback does not mistake it for a dropped connection.
+        self._closing = False
+        # Timestamps used to detect a "zombie" session (socket up but no traffic).
         self._last_connect_at: datetime | None = None
         self._last_message_at: datetime | None = None
 
@@ -58,6 +69,8 @@ class DjiRomoMqttClient:
             return
 
         await self.async_disconnect()
+
+        # Building the SSL context loads CA certs from disk; do it off the event loop.
         ssl_context = await self._loop.run_in_executor(None, ssl.create_default_context)
 
         client = mqtt.Client(
@@ -68,19 +81,32 @@ class DjiRomoMqttClient:
         client.enable_logger(_LOGGER)
         client.username_pw_set(credentials.username, credentials.password)
         client.tls_set_context(ssl_context)
+        # Let paho transparently reconnect transient broker drops (the DJI broker
+        # recycles idle connections periodically); on_connect re-subscribes.
+        client.reconnect_delay_set(min_delay=1, max_delay=120)
         client.on_connect = self._on_connect
         client.on_disconnect = self._on_disconnect
         client.on_message = self._on_paho_message
 
         self._client = client
         self._connected.clear()
+        self._closing = False
         self._subscriptions = tuple(subscriptions)
         self._current_credentials = new_credentials
 
         client.connect_async(credentials.domain, credentials.port, keepalive=60)
         client.loop_start()
 
-        await asyncio.wait_for(self._connected.wait(), timeout=30)
+        try:
+            await asyncio.wait_for(self._connected.wait(), timeout=30)
+        except TimeoutError as err:
+            # Could not authenticate against the broker in time. Tear the
+            # half-open client down so the next attempt starts clean and the
+            # caller can refresh credentials.
+            await self.async_disconnect()
+            raise DjiRomoMqttError(
+                "Timed out establishing the DJI Romo MQTT session."
+            ) from err
 
     async def async_disconnect(self) -> None:
         """Tear down the MQTT client."""
@@ -89,6 +115,7 @@ class DjiRomoMqttClient:
 
         client = self._client
         self._client = None
+        self._closing = True
         self._connected.clear()
         self._current_credentials = None
         self._subscriptions = ()
@@ -99,15 +126,19 @@ class DjiRomoMqttClient:
         await self._loop.run_in_executor(None, client.loop_stop)
 
     @property
-    def last_message_at(self) -> datetime | None:
-        """Return when the last MQTT message was received."""
-        return self._last_message_at
+    def is_connected(self) -> bool:
+        """Return True when the broker session is up."""
+        return self._client is not None and self._connected.is_set()
 
     def stale_since(self, max_age: timedelta) -> datetime | None:
-        """Return the stale timestamp when the MQTT stream stopped updating."""
+        """Return the reference time when a CONNECTED session went silent.
+
+        Detects a "zombie" link: the socket is up but the broker has pushed nothing
+        for longer than ``max_age``. Returns None when not connected (a real
+        disconnect is handled by the down-checks path) or when traffic is fresh.
+        """
         if self._client is None or not self._connected.is_set():
             return None
-
         reference = self._last_message_at or self._last_connect_at
         if reference is None:
             return None
@@ -164,6 +195,10 @@ class DjiRomoMqttClient:
         """Handle MQTT disconnect callback."""
         _LOGGER.debug("DJI Romo MQTT disconnected: %s", reason_code)
         self._loop.call_soon_threadsafe(self._connected.clear)
+        # Only notify on unexpected drops; an intentional teardown is handled by
+        # async_disconnect itself.
+        if not self._closing and self._on_connection_lost is not None:
+            self._loop.call_soon_threadsafe(self._on_connection_lost)
 
     def _on_paho_message(
         self,

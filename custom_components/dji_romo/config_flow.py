@@ -6,12 +6,11 @@ from collections.abc import Mapping
 import json
 from typing import Any
 
-import voluptuous as vol
-
 from homeassistant import config_entries
 from homeassistant.const import CONF_NAME
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import TextSelector, TextSelectorConfig
+import voluptuous as vol
 
 from .client import DjiRomoApiClient, DjiRomoApiError
 from .const import (
@@ -37,7 +36,6 @@ class DjiRomoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for DJI Romo."""
 
     VERSION = 1
-    _reauth_entry: config_entries.ConfigEntry | None = None
 
     async def async_step_user(
         self,
@@ -84,9 +82,6 @@ class DjiRomoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         entry_data: Mapping[str, Any],
     ) -> config_entries.ConfigFlowResult:
         """Handle an expired DJI Home token."""
-        self._reauth_entry = self.hass.config_entries.async_get_entry(
-            self.context["entry_id"]
-        )
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(
@@ -95,12 +90,13 @@ class DjiRomoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> config_entries.ConfigFlowResult:
         """Ask for a fresh token or pasted extractor output."""
         errors: dict[str, str] = {}
+        reauth_entry = self._get_reauth_entry()
 
-        if user_input is not None and self._reauth_entry is not None:
+        if user_input is not None:
             merged_input = {
-                CONF_DEVICE_SN: self._reauth_entry.data[CONF_DEVICE_SN],
-                CONF_NAME: self._reauth_entry.data[CONF_DEVICE_NAME],
-                CONF_LOCALE: self._reauth_entry.data.get(CONF_LOCALE, DEFAULT_LOCALE),
+                CONF_DEVICE_SN: reauth_entry.data[CONF_DEVICE_SN],
+                CONF_NAME: reauth_entry.data[CONF_DEVICE_NAME],
+                CONF_LOCALE: reauth_entry.data.get(CONF_LOCALE, DEFAULT_LOCALE),
                 **user_input,
             }
             try:
@@ -112,17 +108,13 @@ class DjiRomoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except MissingTokenError:
                 errors["base"] = "missing_token"
             else:
-                if data[CONF_DEVICE_SN] != self._reauth_entry.data[CONF_DEVICE_SN]:
+                if data[CONF_DEVICE_SN] != reauth_entry.data[CONF_DEVICE_SN]:
                     errors["base"] = "wrong_device"
                 else:
-                    self.hass.config_entries.async_update_entry(
-                        self._reauth_entry,
-                        data={**self._reauth_entry.data, **data},
+                    return self.async_update_reload_and_abort(
+                        reauth_entry,
+                        data={**reauth_entry.data, **data},
                     )
-                    await self.hass.config_entries.async_reload(
-                        self._reauth_entry.entry_id
-                    )
-                    return self.async_abort(reason="reauth_successful")
 
         return self.async_show_form(
             step_id="reauth_confirm",
@@ -142,14 +134,11 @@ class DjiRomoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         config_entry: config_entries.ConfigEntry,
     ) -> config_entries.OptionsFlow:
         """Create the options flow."""
-        return DjiRomoOptionsFlow(config_entry)
+        return DjiRomoOptionsFlow()
 
 
 class DjiRomoOptionsFlow(config_entries.OptionsFlow):
     """Edit advanced settings for DJI Romo."""
-
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self._config_entry = config_entry
 
     async def async_step_init(
         self,
@@ -181,7 +170,7 @@ class DjiRomoOptionsFlow(config_entries.OptionsFlow):
                     },
                 )
 
-        current = self._config_entry.options
+        current = self.config_entry.options
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -190,28 +179,28 @@ class DjiRomoOptionsFlow(config_entries.OptionsFlow):
                         CONF_DEVICE_NAME,
                         default=current.get(
                             CONF_DEVICE_NAME,
-                            self._config_entry.data[CONF_DEVICE_NAME],
+                            self.config_entry.data[CONF_DEVICE_NAME],
                         ),
                     ): str,
                     vol.Required(
                         CONF_API_URL,
                         default=current.get(
                             CONF_API_URL,
-                            self._config_entry.data.get(CONF_API_URL, DEFAULT_API_URL),
+                            self.config_entry.data.get(CONF_API_URL, DEFAULT_API_URL),
                         ),
                     ): str,
                     vol.Required(
                         CONF_LOCALE,
                         default=current.get(
                             CONF_LOCALE,
-                            self._config_entry.data.get(CONF_LOCALE, DEFAULT_LOCALE),
+                            self.config_entry.data.get(CONF_LOCALE, DEFAULT_LOCALE),
                         ),
                     ): str,
                     vol.Required(
                         CONF_COMMAND_TOPIC,
                         default=current.get(
                             CONF_COMMAND_TOPIC,
-                            self._config_entry.data.get(
+                            self.config_entry.data.get(
                                 CONF_COMMAND_TOPIC,
                                 DEFAULT_COMMAND_TOPIC,
                             ),
@@ -222,7 +211,7 @@ class DjiRomoOptionsFlow(config_entries.OptionsFlow):
                         default="\n".join(
                             current.get(
                                 CONF_SUBSCRIPTION_TOPICS,
-                                self._config_entry.data.get(
+                                self.config_entry.data.get(
                                     CONF_SUBSCRIPTION_TOPICS,
                                     DEFAULT_SUBSCRIPTION_TOPICS,
                                 ),
@@ -234,7 +223,7 @@ class DjiRomoOptionsFlow(config_entries.OptionsFlow):
                         default=json.dumps(
                             current.get(
                                 CONF_COMMAND_MAPPING,
-                                self._config_entry.data.get(
+                                self.config_entry.data.get(
                                     CONF_COMMAND_MAPPING,
                                     json.loads(DEFAULT_COMMAND_MAPPING_JSON),
                                 ),
@@ -289,12 +278,16 @@ async def _validate_user_input(
         except DjiRomoApiError:
             # Some accounts/regions do not expose a usable homes endpoint yet.
             # If the user already knows the serial number, allow setup to continue.
-            device = {
-                "sn": requested_sn,
-                "name": device_name or f"Romo {requested_sn}",
-            }
+            device = {"sn": requested_sn}
         device_sn = device["sn"]
-        device_name = device_name or device.get("name") or f"Romo {device_sn}"
+        device_name = (
+            device_name
+            or device.get("name")
+            or await _discover_device_nickname(
+                session, user_token, device_sn, locale, api_url
+            )
+            or f"Romo {device_sn}"
+        )
     else:
         try:
             device = await client.async_resolve_device(None)
@@ -313,6 +306,34 @@ async def _validate_user_input(
         CONF_SUBSCRIPTION_TOPICS: DEFAULT_SUBSCRIPTION_TOPICS,
         CONF_COMMAND_MAPPING: json.loads(DEFAULT_COMMAND_MAPPING_JSON),
     }
+
+
+async def _discover_device_nickname(
+    session,
+    user_token: str,
+    device_sn: str,
+    locale: str,
+    api_url: str,
+) -> str | None:
+    """Best-effort lookup of the robot's nickname when discovery is unavailable.
+
+    The homes endpoint 404s on some regions, so fall back to the device
+    properties (which carry the name the user set in the DJI Home app).
+    """
+    client = DjiRomoApiClient(
+        session,
+        user_token,
+        device_sn=device_sn,
+        api_url=api_url,
+        locale=locale,
+    )
+    try:
+        properties = await client.async_get_properties()
+    except DjiRomoApiError:
+        return None
+    base = properties.get("device_base_info", {})
+    name = base.get("name") if isinstance(base, dict) else None
+    return str(name).strip() or None if name else None
 
 
 def _parse_credentials_text(raw: str) -> dict[str, str]:

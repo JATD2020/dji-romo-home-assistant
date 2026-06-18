@@ -9,9 +9,11 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import CONF_ROOM_CLEAN_NUM, DOMAIN
+from .const import CONF_ROOM_CLEAN_NUM
 from .coordinator import DjiRomoCoordinator
 from .entity import DjiRomoCoordinatorEntity
+
+PARALLEL_UPDATES = 0
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -37,7 +39,7 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up Romo number entities."""
-    coordinator: DjiRomoCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     async_add_entities(DjiRomoRoomOptionNumber(coordinator, description) for description in NUMBERS)
 
 
@@ -53,6 +55,7 @@ class DjiRomoRoomOptionNumber(DjiRomoCoordinatorEntity, NumberEntity):
     ) -> None:
         super().__init__(coordinator)
         self.entity_description = description
+        self._attr_translation_key = description.key
         self._attr_unique_id = f"{coordinator.device_sn}_{description.key}"
 
     @property

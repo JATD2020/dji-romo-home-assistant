@@ -1,0 +1,12 @@
+clean_rooms:
+  target:
+    entity:
+      integration: dji_romo
+      domain: vacuum
+  fields:
+    rooms:
+      required: true
+      example: '["Kitchen", "Living Room"]'
+      selector:
+        text:
+          multiple: true

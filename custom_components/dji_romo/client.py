@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+import json
 import logging
 from typing import Any
 from uuid import uuid4
 
 from aiohttp import ClientError, ClientResponseError, ClientSession
 
-from .const import DEFAULT_API_URL, DEFAULT_LOCALE
+from .const import DEFAULT_API_URL, DEFAULT_LOCALE, DEFAULT_START_PLAN_KEYS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ class DjiMqttCredentials:
     username: str
     password: str
     fetched_at: datetime
+    expires_at: datetime | None = None
 
 
 class DjiRomoApiClient:
@@ -60,28 +62,119 @@ class DjiRomoApiClient:
             params={"reason": "mqtt"},
         )
         data = payload["data"]
+        fetched_at = datetime.now(UTC)
+        expires_at: datetime | None = None
+        expire_seconds = _coerce_result_code(data.get("expire"))
+        if expire_seconds and expire_seconds > 0:
+            expires_at = fetched_at + timedelta(seconds=expire_seconds)
         return DjiMqttCredentials(
             domain=data["mqtt_domain"],
             port=int(data["mqtt_port"]),
             client_id=data["client_id"],
             username=data["user_uuid"],
             password=data["user_token"],
-            fetched_at=datetime.now(UTC),
+            fetched_at=fetched_at,
+            expires_at=expires_at,
         )
+
+    async def _async_fetch_current_map(self) -> dict[str, Any] | None:
+        """Download and decrypt the current SLAM map file, returning its JSON.
+
+        The map is an AES-256-GCM blob (nonce = first 16 bytes, tag appended)
+        encrypted with the device share key from safety/info.  It contains the
+        floor plan (seg_map) and the cleaning-coverage grid (grid_map), and is
+        refreshed server-side during a session — so a fresh client (or HA after a
+        restart) can re-fetch the full current coverage without local state.
+        """
+        try:
+            safety_info = await self._device_request("GET", "safety/info")
+            share_key_hex: str = safety_info.get("data", {}).get("share_encryption_key", "")
+            if not share_key_hex or len(share_key_hex) != 64:
+                return None
+            share_key = bytes.fromhex(share_key_hex)
+        except DjiRomoApiError:
+            return None
+
+        try:
+            maps_payload = await self._device_request("GET", "maps/list")
+            map_list: list[dict[str, Any]] = maps_payload.get("data", {}).get("map_list", [])
+            current_map = next((m for m in map_list if m.get("is_current")), None)
+            if not current_map:
+                current_map = map_list[0] if map_list else None
+            if not current_map:
+                return None
+        except DjiRomoApiError:
+            return None
+
+        file_url: str = current_map.get("file_url", "")
+        file_header: dict[str, str] = current_map.get("file_header", {})
+        if not file_url:
+            return None
+
+        try:
+            async with self._session.get(
+                file_url,
+                headers={k: v for k, v in file_header.items()},
+                raise_for_status=True,
+            ) as resp:
+                encrypted_bytes = await resp.read()
+        except ClientError:
+            return None
+
+        try:
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            aesgcm = AESGCM(share_key)
+            plaintext = aesgcm.decrypt(encrypted_bytes[:16], encrypted_bytes[16:], None)
+            return json.loads(plaintext)
+        except Exception:
+            return None
+
+    async def async_get_floor_plan(self) -> list[dict[str, Any]] | None:
+        """Fetch and decrypt the floor plan polygon data.
+
+        Returns a list of room polygon dicts from seg_map.poly_info, or None if
+        the map is unavailable.  Each dict has keys: poly_index, poly_label,
+        user_label, poly_name_index, custom_name, vertices (list of {x, y}).
+        """
+        data = await self._async_fetch_current_map()
+        if not data:
+            return None
+        poly_info: list[dict[str, Any]] = data.get("seg_map", {}).get("poly_info") or []
+        return poly_info if poly_info else None
 
     async def async_get_homes(self) -> list[dict[str, Any]]:
         """Fetch homes and attached devices for the logged-in user."""
         payload = await self._request("/app/api/v1/homes")
         return payload.get("data", {}).get("homes", [])
 
+    async def async_get_jobs(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Fetch the most recent cleaning jobs, newest first."""
+        jobs, _total = await self.async_get_jobs_and_total(limit)
+        return jobs
+
+    async def async_get_jobs_and_total(
+        self, limit: int = 10
+    ) -> tuple[list[dict[str, Any]], int | None]:
+        """Fetch recent jobs plus the lifetime job count (pagination total)."""
+        payload = await self._device_request(
+            "GET",
+            "jobs/cleans/job/list",
+            params={"offset": 0, "limit": limit},
+        )
+        data = payload.get("data", {})
+        return data.get("job_list", []), _coerce_result_code(data.get("total"))
+
     async def async_get_active_job(self) -> dict[str, Any] | None:
         """Fetch the current or most recent cleaning job."""
-        payload = await self._device_request("GET", "jobs/cleans/job/list")
-        jobs = payload.get("data", {}).get("job_list", [])
-        for job in jobs:
+        for job in await self.async_get_jobs():
             if job.get("status") in {"in_progress", "paused"}:
                 return job
         return None
+
+    async def async_get_last_job(self) -> dict[str, Any] | None:
+        """Return the newest cleaning job regardless of status."""
+        jobs = await self.async_get_jobs(limit=1)
+        return jobs[0] if jobs else None
 
     async def async_get_shortcuts(self) -> list[dict[str, Any]]:
         """Fetch app cleaning shortcuts, including room and map metadata."""
@@ -125,12 +218,12 @@ class DjiRomoApiClient:
         return alerts
 
     async def async_start_clean(self) -> None:
-        """Start a full room-cleaning job using the first DJI Home shortcut."""
+        """Start a whole-home cleaning job from the best available shortcut."""
         shortcuts = await self.async_get_shortcuts()
         if not shortcuts:
             raise DjiRomoApiError("No DJI Home cleaning shortcuts were returned.")
 
-        await self.async_start_shortcut(shortcuts[0])
+        await self.async_start_shortcut(_default_start_shortcut(shortcuts))
 
     async def async_start_shortcut(self, shortcut: dict[str, Any]) -> None:
         """Start a cleaning job from a DJI Home shortcut."""
@@ -194,25 +287,39 @@ class DjiRomoApiClient:
         name: str,
     ) -> None:
         """Start a cleaning job for a single room."""
-        area_config = {
-            "config_uuid": str(uuid4()),
-            "clean_mode": room_config.get("clean_mode", 2),
-            "fan_speed": room_config.get("fan_speed", 2),
-            "water_level": room_config.get("water_level", 2),
-            "clean_num": room_config.get("clean_num", 1),
-            "storm_mode": room_config.get("storm_mode", 0),
-            "secondary_clean_num": room_config.get("secondary_clean_num", 1),
-            "clean_speed": room_config.get("clean_speed", 2),
-            "order_id": 1,
-            "poly_type": room_config.get("poly_type", 2),
-            "poly_index": room_config.get("poly_index", 0),
-            "poly_label": room_config.get("poly_label", 0),
-            "user_label": room_config.get("user_label", 0),
-            "poly_name_index": room_config.get("poly_name_index", 0),
-            "skip_area": 0,
-            "floor_cleaner_type": room_config.get("floor_cleaner_type", 0),
-            "repeat_mop": room_config.get("repeat_mop", False),
-        }
+        await self.async_start_rooms([room_config], room_map, name)
+
+    async def async_start_rooms(
+        self,
+        room_configs: list[dict[str, Any]],
+        room_map: dict[str, Any],
+        name: str,
+    ) -> None:
+        """Start a cleaning job covering one or more rooms, in the given order."""
+        if not room_configs:
+            raise DjiRomoApiError("No rooms were provided to clean.")
+        area_configs = [
+            {
+                "config_uuid": str(uuid4()),
+                "clean_mode": room_config.get("clean_mode", 2),
+                "fan_speed": room_config.get("fan_speed", 2),
+                "water_level": room_config.get("water_level", 2),
+                "clean_num": room_config.get("clean_num", 1),
+                "storm_mode": room_config.get("storm_mode", 0),
+                "secondary_clean_num": room_config.get("secondary_clean_num", 1),
+                "clean_speed": room_config.get("clean_speed", 2),
+                "order_id": order_id,
+                "poly_type": room_config.get("poly_type", 2),
+                "poly_index": room_config.get("poly_index", 0),
+                "poly_label": room_config.get("poly_label", 0),
+                "user_label": room_config.get("user_label", 0),
+                "poly_name_index": room_config.get("poly_name_index", 0),
+                "skip_area": 0,
+                "floor_cleaner_type": room_config.get("floor_cleaner_type", 0),
+                "repeat_mop": room_config.get("repeat_mop", False),
+            }
+            for order_id, room_config in enumerate(room_configs, start=1)
+        ]
         body = {
             "sn": self._device_sn,
             "job_timeout": 3600,
@@ -225,7 +332,7 @@ class DjiRomoApiClient:
                 "plan_type": 2,
                 "clean_area_type": 2,
                 "is_valid": True,
-                "plan_area_configs": [area_config],
+                "plan_area_configs": area_configs,
                 "room_map": {
                     "map_index": room_map.get("map_index", 0),
                     "map_version": room_map.get("map_version", 0),
@@ -406,6 +513,28 @@ class DjiRomoApiClient:
         return headers
 
 
+def _default_start_shortcut(shortcuts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Pick a whole-home plan for the generic Home Assistant "start" action.
+
+    DJI accounts usually expose several built-in programs plus user-created
+    one-room shortcuts. Picking ``shortcuts[0]`` would often start a single-room
+    clean. Prefer a known whole-home program by ``plan_name_key``, otherwise the
+    shortcut that covers the most rooms.
+    """
+    by_key = {
+        str(s.get("plan_name_key") or ""): s
+        for s in shortcuts
+        if s.get("plan_name_key")
+    }
+    for key in DEFAULT_START_PLAN_KEYS:
+        if key in by_key:
+            return by_key[key]
+    return max(
+        shortcuts,
+        key=lambda s: len(s.get("plan_area_configs", [])),
+    )
+
+
 def _coerce_result_code(value: Any) -> int | None:
     """Return DJI result codes as integers when possible."""
     if value is None or isinstance(value, bool):
@@ -414,3 +543,5 @@ def _coerce_result_code(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+

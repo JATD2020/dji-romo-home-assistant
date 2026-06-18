@@ -8,18 +8,24 @@ from homeassistant.components.vacuum import StateVacuumEntity
 from homeassistant.components.vacuum.const import VacuumActivity, VacuumEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import config_validation as cv, entity_platform
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.update_coordinator import UpdateFailed
+import voluptuous as vol
 
 from .const import (
     ATTR_LAST_TOPIC,
     ATTR_LAST_UPDATED,
+    ATTR_ROOMS,
     ATTR_SELECTED_TOPIC,
     CONF_ROOM_FAN_SPEED,
-    DOMAIN,
+    SERVICE_CLEAN_ROOMS,
 )
 from .coordinator import DjiRomoCoordinator
 from .entity import DjiRomoCoordinatorEntity
 
+PARALLEL_UPDATES = 0
 FAN_SPEED_OPTIONS = {
     1: "Quiet",
     2: "Standard",
@@ -33,8 +39,15 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up the DJI Romo vacuum entity."""
-    coordinator: DjiRomoCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     async_add_entities([DjiRomoVacuum(coordinator)])
+
+    platform = entity_platform.async_get_current_platform()
+    platform.async_register_entity_service(
+        SERVICE_CLEAN_ROOMS,
+        {vol.Required(ATTR_ROOMS): vol.All(cv.ensure_list, [cv.string], vol.Length(min=1))},
+        "async_clean_rooms",
+    )
 
 
 class DjiRomoVacuum(DjiRomoCoordinatorEntity, StateVacuumEntity):
@@ -59,16 +72,23 @@ class DjiRomoVacuum(DjiRomoCoordinatorEntity, StateVacuumEntity):
 
     @property
     def activity(self) -> VacuumActivity | None:
-        """Return the vacuum activity."""
-        return VacuumActivity(self.coordinator.data.activity)
+        """Return the vacuum activity, ignoring any unexpected raw value."""
+        try:
+            return VacuumActivity(self.coordinator.data.activity)
+        except ValueError:
+            return None
 
     @property
     def fan_speed(self) -> str | None:
-        """Return best-effort fan/suction mode."""
-        value = (
-            self.coordinator.data.fan_speed
-            or self.coordinator.room_cleaning_options[CONF_ROOM_FAN_SPEED]
-        )
+        """Return the suction mode: the robot's live value, else the room default.
+
+        ``async_set_fan_speed`` writes the room-clean option, so when the robot
+        isn't reporting a live suction we surface that configured default to keep
+        the selector in sync with what it controls.
+        """
+        value = self.coordinator.data.fan_speed
+        if value is None:
+            value = self.coordinator.room_cleaning_options[CONF_ROOM_FAN_SPEED]
         return FAN_SPEED_OPTIONS.get(value)
 
     @property
@@ -124,3 +144,14 @@ class DjiRomoVacuum(DjiRomoCoordinatorEntity, StateVacuumEntity):
     ) -> None:
         """Send a raw command via MQTT."""
         await self.coordinator.async_send_raw_command(command, params)
+
+    async def async_clean_rooms(self, rooms: list[str]) -> None:
+        """Service handler: start a clean covering the named rooms."""
+        try:
+            missing = await self.coordinator.async_clean_rooms_by_name(rooms)
+        except UpdateFailed as err:
+            raise HomeAssistantError(str(err)) from err
+        if missing:
+            raise HomeAssistantError(
+                f"These rooms were not found on the map: {', '.join(missing)}"
+            )

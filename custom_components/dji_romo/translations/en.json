@@ -24,6 +24,7 @@
     "error": {
       "cannot_connect": "Could not connect to DJI Home.",
       "cannot_discover_device": "Token is valid, but the robot could not be auto-discovered. Enter the device serial number manually.",
+      "invalid_json": "Invalid JSON.",
       "missing_token": "Paste extractor output or enter a DJI user token.",
       "wrong_device": "These credentials are for a different DJI Romo."
     },
@@ -54,6 +55,277 @@
     "auth_failed": {
       "title": "DJI Romo authentication failed",
       "description": "The DJI Home user token is invalid or expired. Extract fresh credentials from the DJI Home app and reconfigure the DJI Romo integration. You can paste the full `.env` or `dji_credentials.txt` output. Error: {error}"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery": {
+        "name": "Battery"
+      },
+      "current_cleaning_mode": {
+        "name": "Current Cleaning Mode"
+      },
+      "current_suction_power": {
+        "name": "Current Suction Power"
+      },
+      "current_water_level": {
+        "name": "Current Water Level"
+      },
+      "current_cleaning_passes": {
+        "name": "Current Cleaning Passes"
+      },
+      "current_mopping_speed": {
+        "name": "Current Mopping Speed"
+      },
+      "firmware": {
+        "name": "Firmware"
+      },
+      "dock_serial": {
+        "name": "Dock Serial"
+      },
+      "clean_water_tank": {
+        "name": "Clean Water Tank"
+      },
+      "dirty_water_tank": {
+        "name": "Dirty Water Tank"
+      },
+      "dock_cleaning_solution": {
+        "name": "Dock Cleaning Solution"
+      },
+      "dock_dust_bag": {
+        "name": "Dock Dust Bag"
+      },
+      "mop_pad": {
+        "name": "Mop Pad"
+      },
+      "side_brush": {
+        "name": "Side Brush"
+      },
+      "filter": {
+        "name": "High-Efficiency Filter"
+      },
+      "roller_brush": {
+        "name": "Roller Brush"
+      },
+      "dust_bag": {
+        "name": "Dust Bag"
+      },
+      "cleaning_solution": {
+        "name": "Cleaning Solution"
+      },
+      "base_washboard": {
+        "name": "Base Station Washboard"
+      },
+      "consumable_alerts": {
+        "name": "Consumable Alerts"
+      },
+      "active_alerts": {
+        "name": "Active Alerts"
+      },
+      "last_clean_area": {
+        "name": "Last Clean Area"
+      },
+      "last_clean_duration": {
+        "name": "Last Clean Duration"
+      },
+      "last_clean_status": {
+        "name": "Last Clean Status"
+      },
+      "last_clean_start": {
+        "name": "Last Clean Start"
+      },
+      "last_clean_end": {
+        "name": "Last Clean End"
+      },
+      "device_volume": {
+        "name": "Device Volume"
+      },
+      "device_language": {
+        "name": "Device Language"
+      },
+      "auto_dust_collect": {
+        "name": "Auto Dust Collect"
+      },
+      "auto_drying": {
+        "name": "Auto Drying"
+      },
+      "hot_water_mop": {
+        "name": "Hot Water Mopping"
+      },
+      "auto_add_cleaner": {
+        "name": "Auto Add Cleaner"
+      },
+      "current_room": {
+        "name": "Current Cleaning Room"
+      },
+      "mapped_area": {
+        "name": "Mapped Area"
+      },
+      "room_count": {
+        "name": "Room Count"
+      },
+      "distance_to_dock": {
+        "name": "Distance to Dock"
+      },
+      "robot_position": {
+        "name": "Robot Position"
+      },
+      "total_cleanings": {
+        "name": "Total Cleanings"
+      },
+      "drying_status": {
+        "name": "Drying Status"
+      },
+      "drying_progress": {
+        "name": "Drying Progress"
+      },
+      "drying_time_remaining": {
+        "name": "Drying Time Remaining"
+      },
+      "antibacterial_solution": {
+        "name": "Antibacterial Cleaning Solution"
+      },
+      "cleaning_progress": {
+        "name": "Cleaning Progress"
+      },
+      "current_clean_area": {
+        "name": "Current Clean Area"
+      },
+      "current_clean_duration": {
+        "name": "Current Clean Duration"
+      },
+      "clean_time_remaining": {
+        "name": "Clean Time Remaining"
+      },
+      "last_clean_battery_used": {
+        "name": "Last Clean Battery Used"
+      },
+      "last_clean_dust_collections": {
+        "name": "Last Clean Dust Collections"
+      },
+      "last_clean_mop_washes": {
+        "name": "Last Clean Mop Washes"
+      },
+      "last_clean_dock_returns": {
+        "name": "Last Clean Dock Returns"
+      },
+      "hatch_status": {
+        "name": "Hatch"
+      },
+      "network_status": {
+        "name": "Network Status"
+      }
+    },
+    "binary_sensor": {
+      "online": {
+        "name": "Online"
+      },
+      "charging": {
+        "name": "Charging"
+      },
+      "dust_bag_installed": {
+        "name": "Dust Bag Installed"
+      },
+      "problem": {
+        "name": "Problem"
+      },
+      "dust_bag_uv": {
+        "name": "Dust Bag UV Lamp"
+      },
+      "battery_care": {
+        "name": "Battery Care"
+      },
+      "child_lock": {
+        "name": "Child Lock"
+      },
+      "do_not_disturb": {
+        "name": "Do Not Disturb"
+      },
+      "auto_dust_box_drying": {
+        "name": "Auto Dust Box Drying"
+      },
+      "carpet_detection": {
+        "name": "Carpet Detection"
+      },
+      "pet_care": {
+        "name": "Pet Care"
+      },
+      "ai_obstacle_recognition": {
+        "name": "AI Obstacle Recognition"
+      },
+      "auto_mop_wash": {
+        "name": "Auto Mop Wash"
+      },
+      "mop_ozone_deodorizer": {
+        "name": "Mop Ozone Deodorizer"
+      },
+      "mop_deodorizer": {
+        "name": "Mop Deodorizer"
+      },
+      "enhanced_particle_cleaning": {
+        "name": "Enhanced Particle Cleaning"
+      },
+      "enhanced_stain_cleaning": {
+        "name": "Enhanced Stain Cleaning"
+      },
+      "status_light": {
+        "name": "Status Light"
+      }
+    },
+    "select": {
+      "room_clean_mode": {
+        "name": "Room Cleaning Mode"
+      },
+      "room_fan_speed": {
+        "name": "Room Suction Power"
+      },
+      "room_water_level": {
+        "name": "Room Water Level"
+      },
+      "room_clean_speed": {
+        "name": "Room Mopping Speed"
+      }
+    },
+    "number": {
+      "room_clean_num": {
+        "name": "Room Cleaning Passes"
+      }
+    },
+    "button": {
+      "dust_collect": {
+        "name": "Dust Collection"
+      },
+      "wash_mop_pads": {
+        "name": "Wash Mop Pads"
+      },
+      "dry_mop_pads": {
+        "name": "Dry Mop Pads"
+      },
+      "clear_map": {
+        "name": "Clear Map"
+      }
+    },
+    "image": {
+      "map": {
+        "name": "Map"
+      }
+    },
+    "event": {
+      "hms": {
+        "name": "Health Alert"
+      }
+    }
+  },
+  "services": {
+    "clean_rooms": {
+      "name": "Clean rooms",
+      "description": "Start a cleaning job covering one or more named rooms.",
+      "fields": {
+        "rooms": {
+          "name": "Rooms",
+          "description": "List of room names to clean (as shown on the per-room buttons)."
+        }
+      }
     }
   }
 }

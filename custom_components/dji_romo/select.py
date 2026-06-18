@@ -14,10 +14,11 @@ from .const import (
     CONF_ROOM_CLEAN_SPEED,
     CONF_ROOM_FAN_SPEED,
     CONF_ROOM_WATER_LEVEL,
-    DOMAIN,
 )
 from .coordinator import DjiRomoCoordinator
 from .entity import DjiRomoCoordinatorEntity
+
+PARALLEL_UPDATES = 0
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -79,7 +80,7 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up Romo select entities."""
-    coordinator: DjiRomoCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     async_add_entities(DjiRomoRoomOptionSelect(coordinator, description) for description in SELECTS)
 
 
@@ -95,6 +96,7 @@ class DjiRomoRoomOptionSelect(DjiRomoCoordinatorEntity, SelectEntity):
     ) -> None:
         super().__init__(coordinator)
         self.entity_description = description
+        self._attr_translation_key = description.key
         self._attr_unique_id = f"{coordinator.device_sn}_{description.key}"
         self._attr_options = list(description.option_map)
 

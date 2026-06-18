@@ -2,20 +2,32 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorEntityDescription
+from homeassistant.components.sensor import (
+    RestoreSensor,
+    SensorDeviceClass,
+    SensorEntityDescription,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, EntityCategory
+from homeassistant.const import (
+    PERCENTAGE,
+    EntityCategory,
+    UnitOfArea,
+    UnitOfLength,
+    UnitOfTime,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import ATTR_LAST_UPDATED, DOMAIN
 from .coordinator import DjiRomoCoordinator
 from .entity import DjiRomoCoordinatorEntity
 
+PARALLEL_UPDATES = 0
 CLEAN_MODE_LABELS = {
     0: "Vacuum then Mop",
     1: "Vacuum and Mop",
@@ -39,6 +51,11 @@ CLEAN_SPEED_LABELS = {
     2: "Standard",
     3: "Fast",
 }
+DRYING_STAGE_LABELS = {
+    "drying_box": "Drying Dust Box",
+    "drying_mop": "Drying Mop Pads",
+    "drying_mop_box": "Drying Mop & Dust Box",
+}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -47,6 +64,8 @@ class DjiRomoSensorDescription(SensorEntityDescription):
 
     value_fn: Callable[[DjiRomoCoordinator], Any]
     attrs_fn: Callable[[DjiRomoCoordinator], dict[str, Any]] | None = None
+    # Show the last known value after a restart while the live value is still None.
+    restore: bool = True
 
 
 SENSORS: tuple[DjiRomoSensorDescription, ...] = (
@@ -72,9 +91,11 @@ SENSORS: tuple[DjiRomoSensorDescription, ...] = (
     DjiRomoSensorDescription(
         key="current_suction_power",
         name="Current Suction Power",
-        value_fn=lambda coordinator: _label(
+        value_fn=lambda coordinator: _mode_aware_label(
+            coordinator,
             coordinator.data.fan_speed,
             FAN_SPEED_LABELS,
+            (3,),  # Mop Only
         ),
         attrs_fn=lambda coordinator: _raw_value_attr(
             "fan_speed",
@@ -84,9 +105,11 @@ SENSORS: tuple[DjiRomoSensorDescription, ...] = (
     DjiRomoSensorDescription(
         key="current_water_level",
         name="Current Water Level",
-        value_fn=lambda coordinator: _label(
+        value_fn=lambda coordinator: _mode_aware_label(
+            coordinator,
             coordinator.data.water_level,
             WATER_LEVEL_LABELS,
+            (2,),  # Vacuum Only
         ),
         attrs_fn=lambda coordinator: _raw_value_attr(
             "water_level",
@@ -101,9 +124,11 @@ SENSORS: tuple[DjiRomoSensorDescription, ...] = (
     DjiRomoSensorDescription(
         key="current_mopping_speed",
         name="Current Mopping Speed",
-        value_fn=lambda coordinator: _label(
+        value_fn=lambda coordinator: _mode_aware_label(
+            coordinator,
             coordinator.data.clean_speed,
             CLEAN_SPEED_LABELS,
+            (2,),  # Vacuum Only
         ),
         attrs_fn=lambda coordinator: _raw_value_attr(
             "clean_speed",
@@ -233,6 +258,18 @@ SENSORS: tuple[DjiRomoSensorDescription, ...] = (
         ),
     ),
     DjiRomoSensorDescription(
+        key="antibacterial_solution",
+        name="Antibacterial Cleaning Solution",
+        native_unit_of_measurement=PERCENTAGE,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda coordinator: _consumable_value(
+            coordinator, "secondary_cleaner_life", "percentage"
+        ),
+        attrs_fn=lambda coordinator: _consumable_attrs(
+            coordinator, "secondary_cleaner_life"
+        ),
+    ),
+    DjiRomoSensorDescription(
         key="base_washboard",
         name="Base Station Washboard",
         native_unit_of_measurement=PERCENTAGE,
@@ -252,6 +289,198 @@ SENSORS: tuple[DjiRomoSensorDescription, ...] = (
         attrs_fn=lambda coordinator: {
             "alerts": coordinator.data.cloud_data.get("consumable_alerts", [])
         },
+    ),
+    DjiRomoSensorDescription(
+        key="active_alerts",
+        name="Active Alerts",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda coordinator: len(coordinator.data.hms_alerts),
+        attrs_fn=lambda coordinator: {"alerts": coordinator.data.hms_alerts},
+    ),
+    DjiRomoSensorDescription(
+        key="current_room",
+        name="Current Cleaning Room",
+        icon="mdi:floor-plan",
+        # No restore: this must be empty when the robot isn't cleaning, not show a
+        # stale room from the previous run.
+        restore=False,
+        value_fn=lambda coordinator: coordinator.data.current_room,
+    ),
+    DjiRomoSensorDescription(
+        key="mapped_area",
+        name="Mapped Area",
+        native_unit_of_measurement=UnitOfArea.SQUARE_METERS,
+        icon="mdi:ruler-square",
+        value_fn=lambda coordinator: _mapped_area(coordinator),
+        attrs_fn=lambda coordinator: {
+            "rooms": len(coordinator.data.rooms),
+            "areas": {r["name"]: r["area"] for r in coordinator.data.rooms},
+        },
+    ),
+    DjiRomoSensorDescription(
+        key="room_count",
+        name="Room Count",
+        icon="mdi:home-floor-g",
+        value_fn=lambda coordinator: len(coordinator.data.rooms) or None,
+    ),
+    DjiRomoSensorDescription(
+        key="distance_to_dock",
+        name="Distance to Dock",
+        native_unit_of_measurement=UnitOfLength.METERS,
+        device_class=SensorDeviceClass.DISTANCE,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:map-marker-distance",
+        value_fn=lambda coordinator: _distance_to_dock(coordinator),
+    ),
+    DjiRomoSensorDescription(
+        key="robot_position",
+        name="Robot Position",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:robot-vacuum",
+        value_fn=lambda coordinator: _position_text(coordinator),
+        attrs_fn=lambda coordinator: _position_attrs(coordinator),
+    ),
+    DjiRomoSensorDescription(
+        key="last_clean_area",
+        name="Last Clean Area",
+        native_unit_of_measurement=UnitOfArea.SQUARE_METERS,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda coordinator: _job_value(coordinator, "cleaned_acreage"),
+    ),
+    DjiRomoSensorDescription(
+        key="last_clean_duration",
+        name="Last Clean Duration",
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        device_class=SensorDeviceClass.DURATION,
+        value_fn=lambda coordinator: _job_duration_minutes(coordinator),
+    ),
+    DjiRomoSensorDescription(
+        key="last_clean_status",
+        name="Last Clean Status",
+        value_fn=lambda coordinator: _job_value(coordinator, "status"),
+        attrs_fn=lambda coordinator: _last_job_attrs(coordinator),
+    ),
+    DjiRomoSensorDescription(
+        key="last_clean_start",
+        name="Last Clean Start",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        value_fn=lambda coordinator: _job_timestamp(coordinator, "start_time"),
+    ),
+    DjiRomoSensorDescription(
+        key="last_clean_end",
+        name="Last Clean End",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        value_fn=lambda coordinator: _job_timestamp(coordinator, "end_time"),
+    ),
+    DjiRomoSensorDescription(
+        key="total_cleanings",
+        name="Total Cleanings",
+        icon="mdi:counter",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=lambda coordinator: coordinator.data.total_cleanings,
+    ),
+    # --- Group A: live progress of the current cleaning job ---
+    DjiRomoSensorDescription(
+        key="cleaning_progress",
+        name="Cleaning Progress",
+        native_unit_of_measurement=PERCENTAGE,
+        icon="mdi:progress-check",
+        # 0 (not unknown) when no clean is in progress.
+        value_fn=lambda coordinator: coordinator.data.clean_progress or 0,
+    ),
+    DjiRomoSensorDescription(
+        key="current_clean_area",
+        name="Current Clean Area",
+        native_unit_of_measurement=UnitOfArea.SQUARE_METERS,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:ruler-square",
+        # 0 (not unknown) when no clean is in progress.
+        value_fn=lambda coordinator: coordinator.data.cleaned_area or 0,
+    ),
+    DjiRomoSensorDescription(
+        key="current_clean_duration",
+        name="Current Clean Duration",
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        device_class=SensorDeviceClass.DURATION,
+        icon="mdi:timer-outline",
+        # 0 (not unknown) when no clean is in progress.
+        value_fn=lambda coordinator: _seconds_to_minutes(
+            coordinator.data.clean_duration_s
+        ) or 0,
+    ),
+    DjiRomoSensorDescription(
+        key="clean_time_remaining",
+        name="Clean Time Remaining",
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        device_class=SensorDeviceClass.DURATION,
+        icon="mdi:timer-sand",
+        # 0 (not unknown) when no clean is in progress.
+        value_fn=lambda coordinator: _seconds_to_minutes(
+            coordinator.data.clean_remaining_s
+        ) or 0,
+    ),
+    # --- Group B: stats of the most recent finished job ---
+    DjiRomoSensorDescription(
+        key="last_clean_battery_used",
+        name="Last Clean Battery Used",
+        native_unit_of_measurement=PERCENTAGE,
+        icon="mdi:battery-minus-variant",
+        value_fn=lambda coordinator: _job_value(coordinator, "battery_consumption"),
+    ),
+    DjiRomoSensorDescription(
+        key="last_clean_dust_collections",
+        name="Last Clean Dust Collections",
+        icon="mdi:delete-restore",
+        value_fn=lambda coordinator: _job_value(coordinator, "dust_collect_times"),
+    ),
+    DjiRomoSensorDescription(
+        key="last_clean_mop_washes",
+        name="Last Clean Mop Washes",
+        icon="mdi:water-sync",
+        value_fn=lambda coordinator: _job_value(coordinator, "wash_back_times"),
+    ),
+    DjiRomoSensorDescription(
+        key="last_clean_dock_returns",
+        name="Last Clean Dock Returns",
+        icon="mdi:home-import-outline",
+        value_fn=lambda coordinator: _job_value(coordinator, "return_charge_times"),
+    ),
+    # --- Group C: diagnostic status ---
+    DjiRomoSensorDescription(
+        key="hatch_status",
+        name="Hatch",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:window-shutter",
+        value_fn=lambda coordinator: _hatch_status(coordinator),
+    ),
+    DjiRomoSensorDescription(
+        key="network_status",
+        name="Network Status",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:wifi",
+        value_fn=lambda coordinator: coordinator.property_value("network_status"),
+    ),
+    DjiRomoSensorDescription(
+        key="drying_status",
+        name="Drying Status",
+        icon="mdi:weather-windy",
+        value_fn=lambda coordinator: _drying_status(coordinator),
+    ),
+    DjiRomoSensorDescription(
+        key="drying_progress",
+        name="Drying Progress",
+        native_unit_of_measurement=PERCENTAGE,
+        icon="mdi:water-percent",
+        # 0 (not unknown) when no drying is in progress.
+        value_fn=lambda coordinator: coordinator.data.drying_percent or 0,
+    ),
+    DjiRomoSensorDescription(
+        key="drying_time_remaining",
+        name="Drying Time Remaining",
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        device_class=SensorDeviceClass.DURATION,
+        icon="mdi:timer-sand",
+        value_fn=lambda coordinator: _drying_remaining_minutes(coordinator),
     ),
     DjiRomoSensorDescription(
         key="device_volume",
@@ -316,11 +545,11 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up Romo sensors."""
-    coordinator: DjiRomoCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     async_add_entities(DjiRomoSensor(coordinator, description) for description in SENSORS)
 
 
-class DjiRomoSensor(DjiRomoCoordinatorEntity, SensorEntity):
+class DjiRomoSensor(DjiRomoCoordinatorEntity, RestoreSensor):
     """Coordinator-backed Romo sensor."""
 
     entity_description: DjiRomoSensorDescription
@@ -332,12 +561,25 @@ class DjiRomoSensor(DjiRomoCoordinatorEntity, SensorEntity):
     ) -> None:
         super().__init__(coordinator)
         self.entity_description = description
+        self._attr_translation_key = description.key
         self._attr_unique_id = f"{coordinator.device_sn}_{description.key}"
+        self._restored_value: Any = None
+
+    async def async_added_to_hass(self) -> None:
+        """Load the last value so it shows after a restart until live data arrives."""
+        await super().async_added_to_hass()
+        if self.entity_description.restore:
+            last = await self.async_get_last_sensor_data()
+            if last is not None:
+                self._restored_value = last.native_value
 
     @property
     def native_value(self) -> Any:
-        """Return the current sensor state."""
-        return self.entity_description.value_fn(self.coordinator)
+        """Return the live value, falling back to the last restored one if None."""
+        value = self.entity_description.value_fn(self.coordinator)
+        if value is None and self.entity_description.restore:
+            return self._restored_value
+        return value
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -358,11 +600,141 @@ def _cloud_path(coordinator: DjiRomoCoordinator, path: str) -> Any:
     return current
 
 
+def _mapped_area(coordinator: DjiRomoCoordinator) -> float | None:
+    """Total mapped floor area across all rooms, in m²."""
+    rooms = coordinator.data.rooms
+    if not rooms:
+        return None
+    return round(sum(r.get("area") or 0.0 for r in rooms), 1)
+
+
+def _distance_to_dock(coordinator: DjiRomoCoordinator) -> float | None:
+    """Straight-line distance from the robot to its dock, in metres."""
+    data = coordinator.data
+    if None in (data.robot_x, data.robot_y, data.dock_x, data.dock_y):
+        return None
+    from math import hypot
+
+    return round(hypot(data.robot_x - data.dock_x, data.robot_y - data.dock_y), 2)
+
+
+def _position_text(coordinator: DjiRomoCoordinator) -> str | None:
+    """Compact "x, y" label for the robot position sensor state."""
+    data = coordinator.data
+    if data.robot_x is None or data.robot_y is None:
+        return None
+    return f"{data.robot_x}, {data.robot_y}"
+
+
+def _position_attrs(coordinator: DjiRomoCoordinator) -> dict[str, Any]:
+    """Expose robot/dock coordinates and heading."""
+    data = coordinator.data
+    attrs: dict[str, Any] = {}
+    for key, value in (
+        ("x", data.robot_x),
+        ("y", data.robot_y),
+        ("heading", data.robot_yaw),
+        ("dock_x", data.dock_x),
+        ("dock_y", data.dock_y),
+    ):
+        if value is not None:
+            attrs[key] = value
+    return attrs
+
+
+def _job_value(coordinator: DjiRomoCoordinator, key: str) -> Any:
+    """Return a field from the most recent cleaning job."""
+    return coordinator.data.last_job.get(key)
+
+
+def _job_duration_minutes(coordinator: DjiRomoCoordinator) -> int | None:
+    """Return the last job duration in whole minutes."""
+    seconds = coordinator.data.last_job.get("job_duration")
+    if not isinstance(seconds, (int, float)) or seconds <= 0:
+        return None
+    return round(seconds / 60)
+
+
+def _job_timestamp(coordinator: DjiRomoCoordinator, key: str) -> datetime | None:
+    """Return a job epoch-second field as an aware datetime."""
+    value = coordinator.data.last_job.get(key)
+    if not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return datetime.fromtimestamp(value, tz=UTC)
+
+
+def _last_job_attrs(coordinator: DjiRomoCoordinator) -> dict[str, Any]:
+    """Expose the headline details of the most recent job."""
+    job = coordinator.data.last_job
+    return {
+        key: job.get(key)
+        for key in ("name", "plan_name_key", "uuid", "startup_type")
+        if job.get(key) not in (None, "")
+    }
+
+
+def _seconds_to_minutes(seconds: Any) -> int | None:
+    """Convert a seconds value to whole minutes, or None when unavailable."""
+    if not isinstance(seconds, (int, float)) or seconds < 0:
+        return None
+    return round(seconds / 60)
+
+
+def _hatch_status(coordinator: DjiRomoCoordinator) -> str | None:
+    """Return the robot hatch state (Open/Closed) from the live osd stream."""
+    value = coordinator.data.hatch_status
+    if value is None:
+        return None
+    return "Closed" if value == 0 else "Open"
+
+
+def _drying_status(coordinator: DjiRomoCoordinator) -> str:
+    """Return a human label for the dock drying state."""
+    data = coordinator.data
+    if not data.drying_active:
+        return "Idle"
+    return DRYING_STAGE_LABELS.get(data.drying_stage or "", "Drying")
+
+
+def _drying_remaining_minutes(coordinator: DjiRomoCoordinator) -> int:
+    """Return the drying time remaining in whole minutes (0 when not drying).
+
+    Reports 0 rather than None when no drying is in progress, so the sensor shows
+    "0 min" (finished/idle) instead of going to an "unknown" state.
+    """
+    seconds = coordinator.data.drying_remaining_s
+    if (
+        not coordinator.data.drying_active
+        or not isinstance(seconds, (int, float))
+        or seconds < 0
+    ):
+        return 0
+    return round(seconds / 60)
+
+
 def _label(value: int | None, labels: dict[int, str]) -> str | None:
     """Return a display label for a numeric DJI setting."""
     if value is None:
         return None
     return labels.get(value, str(value))
+
+
+def _mode_aware_label(
+    coordinator: DjiRomoCoordinator,
+    value: int | None,
+    labels: dict[int, str],
+    na_modes: tuple[int, ...],
+) -> str | None:
+    """Label that becomes "Not Applicable" in clean modes where it isn't used.
+
+    The robot still reports a mopping speed / water level in Vacuum Only, and a
+    suction power in Mop Only, even though they aren't used. ``na_modes`` lists the
+    clean_mode values for which this setting should read "Not Applicable":
+    Vacuum Only = 2 (no mopping), Mop Only = 3 (no vacuuming). See CLEAN_MODE_LABELS.
+    """
+    if coordinator.data.clean_mode in na_modes:
+        return "Not Applicable"
+    return _label(value, labels)
 
 
 def _raw_value_attr(key: str, value: int | None) -> dict[str, Any]:

@@ -1,0 +1,331 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connecter DJI Romo",
+        "description": "Collez la sortie complète `.env` ou `dji_credentials.txt` de l'extracteur d'identifiants DJI Home, ou saisissez le jeton utilisateur DJI manuellement.",
+        "data": {
+          "credentials_text": "Sortie de l'extracteur (.env ou dji_credentials.txt)",
+          "user_token": "Jeton utilisateur DJI",
+          "device_sn": "Numéro de série de l'appareil",
+          "name": "Nom affiché",
+          "locale": "Langue (locale)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Actualiser les identifiants DJI Romo",
+        "description": "Collez une nouvelle sortie de l'extracteur ou saisissez un nouveau jeton utilisateur DJI.",
+        "data": {
+          "credentials_text": "Sortie de l'extracteur (.env ou dji_credentials.txt)",
+          "user_token": "Jeton utilisateur DJI"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Impossible de se connecter à DJI Home.",
+      "cannot_discover_device": "Le jeton est valide, mais le robot n'a pas pu être détecté automatiquement. Saisissez le numéro de série manuellement.",
+      "invalid_json": "JSON invalide.",
+      "missing_token": "Collez la sortie de l'extracteur ou saisissez un jeton utilisateur DJI.",
+      "wrong_device": "Ces identifiants concernent un autre DJI Romo."
+    },
+    "abort": {
+      "reauth_successful": "Identifiants DJI Romo mis à jour."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Paramètres avancés",
+        "description": "Ajustez les sujets MQTT ou la correspondance des commandes si DJI utilise des noms de méthode différents sur votre robot.",
+        "data": {
+          "device_name": "Nom affiché",
+          "api_url": "URL de base de l'API",
+          "locale": "Langue (locale)",
+          "command_topic": "Sujet MQTT des commandes",
+          "subscription_topics": "Sujets MQTT d'abonnement",
+          "command_mapping": "Correspondance des commandes (JSON)"
+        }
+      }
+    },
+    "error": {
+      "invalid_json": "JSON invalide."
+    }
+  },
+  "issues": {
+    "auth_failed": {
+      "title": "Échec de l'authentification DJI Romo",
+      "description": "Le jeton utilisateur DJI Home est invalide ou expiré. Extrayez de nouveaux identifiants depuis l'application DJI Home et reconfigurez l'intégration DJI Romo. Vous pouvez coller la sortie complète `.env` ou `dji_credentials.txt`. Erreur : {error}"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery": {
+        "name": "Batterie"
+      },
+      "current_cleaning_mode": {
+        "name": "Mode de nettoyage actuel"
+      },
+      "current_suction_power": {
+        "name": "Puissance d'aspiration actuelle"
+      },
+      "current_water_level": {
+        "name": "Niveau d'eau actuel"
+      },
+      "current_cleaning_passes": {
+        "name": "Passages de nettoyage actuels"
+      },
+      "current_mopping_speed": {
+        "name": "Vitesse de serpillière actuelle"
+      },
+      "firmware": {
+        "name": "Micrologiciel"
+      },
+      "dock_serial": {
+        "name": "Numéro de série de la base"
+      },
+      "clean_water_tank": {
+        "name": "Réservoir d'eau propre"
+      },
+      "dirty_water_tank": {
+        "name": "Réservoir d'eau sale"
+      },
+      "dock_cleaning_solution": {
+        "name": "Solution nettoyante de la base"
+      },
+      "dock_dust_bag": {
+        "name": "Sac à poussière de la base"
+      },
+      "mop_pad": {
+        "name": "Serpillière"
+      },
+      "side_brush": {
+        "name": "Brosse latérale"
+      },
+      "filter": {
+        "name": "Filtre haute efficacité"
+      },
+      "roller_brush": {
+        "name": "Brosse rotative"
+      },
+      "dust_bag": {
+        "name": "Sac à poussière"
+      },
+      "cleaning_solution": {
+        "name": "Solution nettoyante"
+      },
+      "base_washboard": {
+        "name": "Plaque de lavage de la base"
+      },
+      "consumable_alerts": {
+        "name": "Alertes consommables"
+      },
+      "active_alerts": {
+        "name": "Alertes actives"
+      },
+      "last_clean_area": {
+        "name": "Surface du dernier nettoyage"
+      },
+      "last_clean_duration": {
+        "name": "Durée du dernier nettoyage"
+      },
+      "last_clean_status": {
+        "name": "Statut du dernier nettoyage"
+      },
+      "last_clean_start": {
+        "name": "Début du dernier nettoyage"
+      },
+      "last_clean_end": {
+        "name": "Fin du dernier nettoyage"
+      },
+      "device_volume": {
+        "name": "Volume de l'appareil"
+      },
+      "device_language": {
+        "name": "Langue de l'appareil"
+      },
+      "auto_dust_collect": {
+        "name": "Aspiration auto des poussières"
+      },
+      "auto_drying": {
+        "name": "Séchage automatique"
+      },
+      "hot_water_mop": {
+        "name": "Serpillière à l'eau chaude"
+      },
+      "auto_add_cleaner": {
+        "name": "Ajout auto de solution"
+      },
+      "current_room": {
+        "name": "Pièce en cours de nettoyage"
+      },
+      "mapped_area": {
+        "name": "Surface cartographiée"
+      },
+      "room_count": {
+        "name": "Nombre de pièces"
+      },
+      "distance_to_dock": {
+        "name": "Distance à la base"
+      },
+      "robot_position": {
+        "name": "Position du robot"
+      },
+      "total_cleanings": {
+        "name": "Nettoyages au total"
+      },
+      "drying_status": {
+        "name": "État du séchage"
+      },
+      "drying_progress": {
+        "name": "Progression du séchage"
+      },
+      "drying_time_remaining": {
+        "name": "Temps de séchage restant"
+      },
+      "antibacterial_solution": {
+        "name": "Solution nettoyante antibactérienne"
+      },
+      "cleaning_progress": {
+        "name": "Progression du nettoyage"
+      },
+      "current_clean_area": {
+        "name": "Surface nettoyée en cours"
+      },
+      "current_clean_duration": {
+        "name": "Durée du nettoyage en cours"
+      },
+      "clean_time_remaining": {
+        "name": "Temps de nettoyage restant"
+      },
+      "last_clean_battery_used": {
+        "name": "Batterie consommée (dernier nettoyage)"
+      },
+      "last_clean_dust_collections": {
+        "name": "Vidages du bac (dernier nettoyage)"
+      },
+      "last_clean_mop_washes": {
+        "name": "Lavages serpillière (dernier nettoyage)"
+      },
+      "last_clean_dock_returns": {
+        "name": "Retours à la base (dernier nettoyage)"
+      },
+      "hatch_status": {
+        "name": "Trappe"
+      },
+      "network_status": {
+        "name": "État réseau"
+      }
+    },
+    "binary_sensor": {
+      "online": {
+        "name": "En ligne"
+      },
+      "charging": {
+        "name": "En charge"
+      },
+      "dust_bag_installed": {
+        "name": "Sac à poussière installé"
+      },
+      "problem": {
+        "name": "Problème"
+      },
+      "dust_bag_uv": {
+        "name": "Lampe UV du sac"
+      },
+      "battery_care": {
+        "name": "Préservation batterie"
+      },
+      "child_lock": {
+        "name": "Verrouillage enfant"
+      },
+      "do_not_disturb": {
+        "name": "Ne pas déranger"
+      },
+      "auto_dust_box_drying": {
+        "name": "Séchage auto du bac à poussière"
+      },
+      "carpet_detection": {
+        "name": "Détection de tapis"
+      },
+      "pet_care": {
+        "name": "Mode animaux"
+      },
+      "ai_obstacle_recognition": {
+        "name": "Reconnaissance d'obstacles IA"
+      },
+      "auto_mop_wash": {
+        "name": "Lavage auto serpillière"
+      },
+      "mop_ozone_deodorizer": {
+        "name": "Désodorisant ozone serpillière"
+      },
+      "mop_deodorizer": {
+        "name": "Désodorisant serpillière"
+      },
+      "enhanced_particle_cleaning": {
+        "name": "Nettoyage renforcé particules"
+      },
+      "enhanced_stain_cleaning": {
+        "name": "Nettoyage renforcé taches"
+      },
+      "status_light": {
+        "name": "Voyant d'état"
+      }
+    },
+    "select": {
+      "room_clean_mode": {
+        "name": "Mode de nettoyage des pièces"
+      },
+      "room_fan_speed": {
+        "name": "Puissance d'aspiration des pièces"
+      },
+      "room_water_level": {
+        "name": "Niveau d'eau des pièces"
+      },
+      "room_clean_speed": {
+        "name": "Vitesse de serpillière des pièces"
+      }
+    },
+    "number": {
+      "room_clean_num": {
+        "name": "Passages de nettoyage des pièces"
+      }
+    },
+    "button": {
+      "dust_collect": {
+        "name": "Collecte des poussières"
+      },
+      "wash_mop_pads": {
+        "name": "Lavage des serpillières"
+      },
+      "dry_mop_pads": {
+        "name": "Séchage des serpillières"
+      },
+      "clear_map": {
+        "name": "Effacer la carte"
+      }
+    },
+    "image": {
+      "map": {
+        "name": "Carte"
+      }
+    },
+    "event": {
+      "hms": {
+        "name": "Alerte de santé"
+      }
+    }
+  },
+  "services": {
+    "clean_rooms": {
+      "name": "Nettoyer des pièces",
+      "description": "Lance un nettoyage couvrant une ou plusieurs pièces nommées.",
+      "fields": {
+        "rooms": {
+          "name": "Pièces",
+          "description": "Liste des noms de pièces à nettoyer (tels qu'affichés sur les boutons par pièce)."
+        }
+      }
+    }
+  }
+}

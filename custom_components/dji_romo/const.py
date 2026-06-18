@@ -38,12 +38,96 @@ DEFAULT_COMMAND_MAPPING = {
 }
 DEFAULT_COMMAND_MAPPING_JSON = json.dumps(DEFAULT_COMMAND_MAPPING, indent=2, sort_keys=True)
 
-PLATFORMS = ["vacuum", "sensor", "button", "select", "number"]
-COORDINATOR_REFRESH_INTERVAL = timedelta(minutes=30)
+# plan_name_key values DJI ships for the built-in cleaning programs. These are
+# stable across locales (the human-readable plan_name is localized, often to
+# Chinese), so we prefer them both for naming and for picking a sensible
+# "clean everything" default when Home Assistant asks the vacuum to start.
+PLAN_NAME_KEYS = {
+    "default_plan_name_daliy": "Daily Cleaning",
+    "default_plan_name_deep": "Deep Cleaning",
+    "default_plan_name_quick": "Fine Vacuum",
+    "default_plan_name_disinfect": "Floor Disinfection",
+    "default_plan_name_temp": "Single Cleaning",
+}
+# Order of preference when HA's generic "start" is pressed: a whole-home daily
+# clean first, then deep, then a fine vacuum.
+DEFAULT_START_PLAN_KEYS = (
+    "default_plan_name_daliy",
+    "default_plan_name_deep",
+    "default_plan_name_quick",
+)
+
+# DJI room-type IDs -> English labels (user_label / poly_label numbering).
+ROOM_LABELS = {
+    1: "Kitchen",
+    2: "Toilet",
+    3: "Living Room",
+    4: "Dining Room",
+    5: "Master Bedroom",
+    6: "Bedroom",
+    7: "Study",
+    8: "Children's Room",
+    9: "Balcony",
+    10: "Bathroom",
+    11: "Foyer",
+    12: "Office",
+    13: "Corridor",
+    14: "Hallway",
+    15: "Other",
+}
+
+PLATFORMS = [
+    "vacuum",
+    "sensor",
+    "binary_sensor",
+    "button",
+    "select",
+    "number",
+    "image",
+    "event",
+]
+
+# Persisted trajectory (so the map survives a Home Assistant restart).
+TRAJECTORY_STORAGE_VERSION = 1
+TRAJECTORY_STORAGE_KEY = f"{DOMAIN}_trajectory"
+# A full cleaning session swept at ~1 Hz can be several thousand points; keep
+# enough that an entire run fits without dropping the rooms cleaned early on.
+TRAJECTORY_MAX_POINTS = 6000
+# Cap on points actually written to disk (the live trace keeps full resolution);
+# a long session is downsampled to this before persisting.
+TRAJECTORY_STORAGE_POINTS = 1500
+TRAJECTORY_SAVE_DELAY = 30  # seconds; debounced disk writes
+
+# Home Assistant service to clean several named rooms in one job.
+SERVICE_CLEAN_ROOMS = "clean_rooms"
+ATTR_ROOMS = "rooms"
+COORDINATOR_REFRESH_INTERVAL = timedelta(minutes=5)
+# While the robot is actively cleaning we poll faster so the "current room"
+# sensor tracks the plan instead of waiting for the slow diagnostic refresh.
+CLEANING_REFRESH_INTERVAL = timedelta(seconds=60)
+# Settings/consumables/shortcuts barely change, so during the fast cleaning poll
+# we only refetch them this often instead of on every cycle.
+STATIC_REFRESH_INTERVAL = timedelta(minutes=5)
 MQTT_CREDENTIAL_REFRESH_MARGIN = timedelta(minutes=15)
+# Fallback lifetime used only if the cloud stops returning an explicit expiry.
 MQTT_CREDENTIAL_ASSUMED_LIFETIME = timedelta(hours=4)
+
+# The robot pushes a device_osd property roughly once per second while online.
+# If we stop hearing from it for this long, treat the device as offline.
+OFFLINE_AFTER = timedelta(seconds=90)
+# How often to re-evaluate offline-by-silence without making any network calls.
+AVAILABILITY_CHECK_INTERVAL = timedelta(seconds=60)
+# A connected-but-silent MQTT session this long is treated as a "zombie": force a
+# rebuild. Kept at 10 min (a docked robot legitimately goes quiet when asleep, so a
+# shorter window would reconnect needlessly); we still flag offline first at 90 s.
 MQTT_STALE_AFTER = timedelta(minutes=10)
+# Consecutive REST refresh failures before marking the coordinator update failed
+# (entities go unavailable) instead of silently keeping stale data.
 CLOUD_REFRESH_FAILURE_LIMIT = 3
+
+# Home Assistant event fired when the robot reports a health-management (HMS)
+# alert, so automations can notify the user that the robot needs attention.
+EVENT_HMS = f"{DOMAIN}_hms"
 
 ATTR_LAST_TOPIC = "last_topic"
 ATTR_LAST_UPDATED = "last_updated"
