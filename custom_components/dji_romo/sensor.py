@@ -336,6 +336,7 @@ SENSORS: tuple[DjiRomoSensorDescription, ...] = (
         key="robot_position",
         name="Robot Position",
         entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
         icon="mdi:robot-vacuum",
         value_fn=lambda coordinator: _position_text(coordinator),
         attrs_fn=lambda coordinator: _position_attrs(coordinator),
