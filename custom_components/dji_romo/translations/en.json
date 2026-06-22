@@ -137,9 +137,6 @@
       "last_clean_end": {
         "name": "Last Clean End"
       },
-      "auto_dust_collect": {
-        "name": "Auto Dust Collect"
-      },
       "current_room": {
         "name": "Current Cleaning Room"
       },
@@ -269,6 +266,12 @@
       },
       "voice_language": {
         "name": "Voice Language"
+      },
+      "dust_collect_mode": {
+        "name": "Dust Collection Mode"
+      },
+      "dust_collect_days": {
+        "name": "Dust Collection Days"
       }
     },
     "number": {
@@ -323,6 +326,9 @@
       },
       "dnd_end": {
         "name": "Do Not Disturb End"
+      },
+      "dust_collect_time": {
+        "name": "Dust Collection Time"
       }
     },
     "button": {

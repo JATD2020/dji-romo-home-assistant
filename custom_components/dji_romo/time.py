@@ -66,6 +66,18 @@ TIMES: tuple[DjiRomoSettingTimeDescription, ...] = (
         hour_key="end_hour",
         minute_key="end_minute",
     ),
+    DjiRomoSettingTimeDescription(
+        key="dust_collect_time",
+        translation_key="dust_collect_time",
+        name="Dust Collection Time",
+        icon="mdi:clock-outline",
+        entity_category=EntityCategory.CONFIG,
+        # Only meaningful when Dust Collection Mode is Scheduled. Nested in
+        # dust_collect; preserves collect_mode + week_repeat.
+        obj_key="dust_collect",
+        hour_key="start_hour",
+        minute_key="start_minute",
+    ),
 )
 
 

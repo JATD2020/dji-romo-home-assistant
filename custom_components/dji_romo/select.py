@@ -209,6 +209,58 @@ SETTING_SELECTS: tuple[DjiRomoSettingSelectDescription, ...] = (
         value_fn=lambda coordinator: _setting(coordinator, "meet_carpet_mode"),
         param_fn=lambda coordinator, val: {"meet_carpet_mode": val},
     ),
+    DjiRomoSettingSelectDescription(
+        key="dust_collect_mode",
+        translation_key="dust_collect_mode",
+        name="Dust Collection Mode",
+        icon="mdi:delete-sweep",
+        entity_category=EntityCategory.CONFIG,
+        # dust_collect.collect_mode, nested; preserves the sibling schedule
+        # (start_hour/start_minute/week_repeat). For Scheduled (3) the app also sets
+        # those — exposing the schedule is a later enhancement. Captured 2026-06-22.
+        option_map={"Auto": 1, "Manual": 2, "Scheduled": 3},
+        value_fn=lambda coordinator: _setting(
+            coordinator, "dust_collect", "collect_mode"
+        ),
+        param_fn=lambda coordinator, val: {
+            "dust_collect": {
+                **(_setting(coordinator, "dust_collect") or {}),
+                "collect_mode": val,
+            }
+        },
+    ),
+    DjiRomoSettingSelectDescription(
+        key="dust_collect_days",
+        translation_key="dust_collect_days",
+        name="Dust Collection Days",
+        icon="mdi:calendar-week",
+        entity_category=EntityCategory.CONFIG,
+        # dust_collect.week_repeat is a Mon-first bitmask (Mon=1, Tue=2, Wed=4,
+        # Thu=8, Fri=16, Sat=32, Sun=64; captured 2026-06-22). Presets only — an
+        # arbitrary mask set in the app (or 0) shows no selection. Nested; preserves
+        # the sibling time + collect_mode.
+        option_map={
+            "Every Day": 127,
+            "Weekdays": 31,
+            "Weekend": 96,
+            "Monday": 1,
+            "Tuesday": 2,
+            "Wednesday": 4,
+            "Thursday": 8,
+            "Friday": 16,
+            "Saturday": 32,
+            "Sunday": 64,
+        },
+        value_fn=lambda coordinator: _setting(
+            coordinator, "dust_collect", "week_repeat"
+        ),
+        param_fn=lambda coordinator, val: {
+            "dust_collect": {
+                **(_setting(coordinator, "dust_collect") or {}),
+                "week_repeat": val,
+            }
+        },
+    ),
 )
 
 # Robot voice language. This is NOT a settings write — it triggers a voicepack

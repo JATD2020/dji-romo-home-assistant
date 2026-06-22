@@ -486,18 +486,7 @@ SENSORS: tuple[DjiRomoSensorDescription, ...] = (
     ),
     # Device volume is now a writable number (see number.py).
     # Voice language is now a writable select (see select.py).
-    DjiRomoSensorDescription(
-        key="auto_dust_collect",
-        name="Auto Dust Collect",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: _cloud_path(
-            coordinator, "settings.dust_collect.collect_mode"
-        ),
-        attrs_fn=lambda coordinator: _cloud_path(
-            coordinator, "settings.dust_collect"
-        )
-        or {},
-    ),
+    # Dust collection mode is now a writable select (see select.py).
     # Auto drying is now a writable switch (see switch.py).
     # Hot water mopping is now a writable switch (see switch.py).
     # Auto add cleaner is now a writable switch (see switch.py).

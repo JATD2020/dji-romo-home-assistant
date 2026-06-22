@@ -137,9 +137,6 @@
       "last_clean_end": {
         "name": "Fin du dernier nettoyage"
       },
-      "auto_dust_collect": {
-        "name": "Aspiration auto des poussières"
-      },
       "current_room": {
         "name": "Pièce en cours de nettoyage"
       },
@@ -269,6 +266,12 @@
       },
       "voice_language": {
         "name": "Langue (voix)"
+      },
+      "dust_collect_mode": {
+        "name": "Mode de collecte des poussières"
+      },
+      "dust_collect_days": {
+        "name": "Jours de collecte"
       }
     },
     "number": {
@@ -323,6 +326,9 @@
       },
       "dnd_end": {
         "name": "Fin Ne pas déranger"
+      },
+      "dust_collect_time": {
+        "name": "Heure de collecte"
       }
     },
     "button": {
