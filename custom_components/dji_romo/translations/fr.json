@@ -137,9 +137,6 @@
       "last_clean_end": {
         "name": "Fin du dernier nettoyage"
       },
-      "device_language": {
-        "name": "Langue de l'appareil"
-      },
       "auto_dust_collect": {
         "name": "Aspiration auto des poussières"
       },
@@ -269,6 +266,9 @@
       },
       "carpet_behavior": {
         "name": "Comportement sur tapis"
+      },
+      "voice_language": {
+        "name": "Langue (voix)"
       }
     },
     "number": {
@@ -298,9 +298,6 @@
       "auto_add_cleaner": {
         "name": "Ajout auto de solution"
       },
-      "sewage_tank_deodorizer": {
-        "name": "Désodorisant bac eaux usées"
-      },
       "enhanced_particle_cleaning": {
         "name": "Nettoyage renforcé particules"
       },
@@ -315,6 +312,17 @@
       },
       "ai_obstacle_recognition": {
         "name": "Contournement intelligent des obstacles"
+      },
+      "obstacle_photo": {
+        "name": "Photos d'obstacles"
+      }
+    },
+    "time": {
+      "dnd_start": {
+        "name": "Début Ne pas déranger"
+      },
+      "dnd_end": {
+        "name": "Fin Ne pas déranger"
       }
     },
     "button": {

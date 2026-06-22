@@ -160,26 +160,30 @@ SWITCHES: tuple[DjiRomoSwitchDescription, ...] = (
             }
         },
     ),
-    DjiRomoSwitchDescription(
-        key="sewage_tank_deodorizer",
-        translation_key="sewage_tank_deodorizer",
-        name="Sewage Tank Deodorizer",
-        icon="mdi:scent",
-        entity_category=EntityCategory.CONFIG,
-        # Sibling of is_add_in_mop inside add_cleaner_auto. The key/container are
-        # confirmed (seen in the auto-add-cleaner capture), but the ON value (1) is
-        # inferred, not MITM-confirmed: the app hides this toggle on this device, so
-        # it was never observed being set. Writes may be rejected if unsupported.
-        value_fn=lambda coordinator: _truthy(
-            _setting(coordinator, "add_cleaner_auto", "sewage_tank_deodorizer")
-        ),
-        param_fn=lambda coordinator, on: {
-            "add_cleaner_auto": {
-                **(_setting(coordinator, "add_cleaner_auto") or {}),
-                "sewage_tank_deodorizer": 1 if on else 0,
-            }
-        },
-    ),
+    # --- DISABLED / UNVERIFIED: sewage_tank_deodorizer ------------------------
+    # Sibling of is_add_in_mop inside add_cleaner_auto. The key/container are
+    # confirmed (seen in the auto-add-cleaner capture), but the ON value (1) is a
+    # GUESS, not MITM-confirmed: the app hides this toggle on this device, so it
+    # was never observed being set, and a write may be rejected if unsupported.
+    # Left commented out (no active entity) until it can be verified.
+    # To enable: uncomment this block and re-add a `sewage_tank_deodorizer` name
+    # under the switch section of the three translation files (or rely on name=).
+    # DjiRomoSwitchDescription(
+    #     key="sewage_tank_deodorizer",
+    #     translation_key="sewage_tank_deodorizer",
+    #     name="Sewage Tank Deodorizer",
+    #     icon="mdi:scent",
+    #     entity_category=EntityCategory.CONFIG,
+    #     value_fn=lambda coordinator: _truthy(
+    #         _setting(coordinator, "add_cleaner_auto", "sewage_tank_deodorizer")
+    #     ),
+    #     param_fn=lambda coordinator, on: {
+    #         "add_cleaner_auto": {
+    #             **(_setting(coordinator, "add_cleaner_auto") or {}),
+    #             "sewage_tank_deodorizer": 1 if on else 0,
+    #         }
+    #     },
+    # ),
     DjiRomoSwitchDescription(
         key="enhanced_particle_cleaning",
         translation_key="enhanced_particle_cleaning",
@@ -271,6 +275,74 @@ SWITCHES: tuple[DjiRomoSwitchDescription, ...] = (
             }
         },
     ),
+    DjiRomoSwitchDescription(
+        key="obstacle_photo",
+        translation_key="obstacle_photo",
+        name="Obstacle Photos",
+        icon="mdi:camera",
+        entity_category=EntityCategory.CONFIG,
+        # Flat key, non-inverted (ON = 1). Captured via MITM 2026-06-22.
+        value_fn=lambda coordinator: _truthy(
+            _setting(coordinator, "obstacle_picture_mode")
+        ),
+        param_fn=lambda coordinator, on: {"obstacle_picture_mode": 1 if on else 0},
+    ),
+    # --- DISABLED / UNVERIFIED: auto_wash -------------------------------------
+    # "Auto mop wash" is NOT visible in the DJI Home app on this account, so its
+    # write body was never captured. The key is known (it still has a read-only
+    # "Auto Mop Wash" binary_sensor reading `auto_wash`), and below is a GUESS by
+    # analogy with the other wash flags: a flat, non-inverted 0/1 flag (ON = 1).
+    # This is NOT MITM-confirmed — it could be inverted or not writable at all,
+    # so it is left commented out (no active entity) until it can be verified.
+    # To enable: uncomment this block, remove the read-only `auto_mop_wash`
+    # binary_sensor, and add an `auto_mop_wash` name under the switch section of
+    # strings.json + translations/en.json + translations/fr.json (or rely on the
+    # name= below). First confirm the ON value via a MITM capture if possible.
+    # DjiRomoSwitchDescription(
+    #     key="auto_mop_wash",
+    #     translation_key="auto_mop_wash",
+    #     name="Auto Mop Wash",
+    #     icon="mdi:waves",
+    #     entity_category=EntityCategory.CONFIG,
+    #     value_fn=lambda coordinator: _truthy(_setting(coordinator, "auto_wash")),
+    #     param_fn=lambda coordinator, on: {"auto_wash": 1 if on else 0},
+    # ),
+    # --- DISABLED / UNVERIFIED: flat flags not visible in the app -------------
+    # These settings are not exposed in the DJI Home app on this account, so their
+    # write bodies were never captured. Each key is known (each still has a
+    # read-only binary_sensor), and below is a GUESS: a flat, non-inverted 0/1 flag
+    # (ON = 1). NOT MITM-confirmed — could be inverted or not writable. Left
+    # commented out until verified. To enable one: uncomment its block, remove the
+    # matching read-only binary_sensor, and add its name under the switch section
+    # of the three translation files (or rely on name=).
+    # DjiRomoSwitchDescription(
+    #     key="enhanced_stain_cleaning",
+    #     translation_key="enhanced_stain_cleaning",
+    #     name="Enhanced Stain Cleaning",
+    #     icon="mdi:liquid-spot",
+    #     entity_category=EntityCategory.CONFIG,
+    #     value_fn=lambda coordinator: _truthy(_setting(coordinator, "enhance_stain_clean")),
+    #     param_fn=lambda coordinator, on: {"enhance_stain_clean": 1 if on else 0},
+    # ),
+    # DjiRomoSwitchDescription(
+    #     key="mop_ozone_deodorizer",
+    #     translation_key="mop_ozone_deodorizer",
+    #     name="Mop Ozone Deodorizer",
+    #     icon="mdi:scent",
+    #     entity_category=EntityCategory.CONFIG,
+    #     value_fn=lambda coordinator: _truthy(_setting(coordinator, "mop_ozone_deodorizer")),
+    #     param_fn=lambda coordinator, on: {"mop_ozone_deodorizer": 1 if on else 0},
+    # ),
+    # DjiRomoSwitchDescription(
+    #     key="status_light",
+    #     translation_key="status_light",
+    #     name="Status Light",
+    #     icon="mdi:led-on",
+    #     entity_category=EntityCategory.CONFIG,
+    #     # NOTE: instruct_light_status may be an enum (light mode), not a 0/1 flag.
+    #     value_fn=lambda coordinator: _truthy(_setting(coordinator, "instruct_light_status")),
+    #     param_fn=lambda coordinator, on: {"instruct_light_status": 1 if on else 0},
+    # ),
 )
 
 

@@ -84,6 +84,7 @@ PLATFORMS = [
     "select",
     "number",
     "switch",
+    "time",
     "image",
     "event",
 ]

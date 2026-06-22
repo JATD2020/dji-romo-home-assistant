@@ -485,12 +485,7 @@ SENSORS: tuple[DjiRomoSensorDescription, ...] = (
         value_fn=lambda coordinator: _drying_remaining_minutes(coordinator),
     ),
     # Device volume is now a writable number (see number.py).
-    DjiRomoSensorDescription(
-        key="device_language",
-        name="Device Language",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: _cloud_path(coordinator, "settings.device_language"),
-    ),
+    # Voice language is now a writable select (see select.py).
     DjiRomoSensorDescription(
         key="auto_dust_collect",
         name="Auto Dust Collect",

@@ -137,9 +137,6 @@
       "last_clean_end": {
         "name": "Last Clean End"
       },
-      "device_language": {
-        "name": "Device Language"
-      },
       "auto_dust_collect": {
         "name": "Auto Dust Collect"
       },
@@ -269,6 +266,9 @@
       },
       "carpet_behavior": {
         "name": "Carpet Behavior"
+      },
+      "voice_language": {
+        "name": "Voice Language"
       }
     },
     "number": {
@@ -298,9 +298,6 @@
       "auto_add_cleaner": {
         "name": "Auto Add Cleaner"
       },
-      "sewage_tank_deodorizer": {
-        "name": "Sewage Tank Deodorizer"
-      },
       "enhanced_particle_cleaning": {
         "name": "Enhanced Particle Cleaning"
       },
@@ -315,6 +312,17 @@
       },
       "ai_obstacle_recognition": {
         "name": "AI Obstacle Recognition"
+      },
+      "obstacle_photo": {
+        "name": "Obstacle Photos"
+      }
+    },
+    "time": {
+      "dnd_start": {
+        "name": "Do Not Disturb Start"
+      },
+      "dnd_end": {
+        "name": "Do Not Disturb End"
       }
     },
     "button": {

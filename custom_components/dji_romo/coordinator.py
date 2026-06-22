@@ -822,6 +822,28 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             new_cloud = {**self.data.cloud_data, "settings": settings}
             self.async_set_updated_data(replace(self.data, cloud_data=new_cloud))
 
+    async def async_set_voice_language(self, lang_code: str) -> None:
+        """Switch the robot's voice language (asynchronous voicepack download).
+
+        Unlike settings writes this is a module upgrade, so there is no optimistic
+        patch: ``device_language`` only changes once the robot installs the pack.
+        We invalidate the static cache and request a refresh so the select catches
+        up on the next poll(s) as the new language is reported.
+        """
+        try:
+            await self.api.async_set_voice_language(lang_code)
+        except DjiRomoAuthError as err:
+            self._async_create_auth_repair_issue(str(err))
+            raise UpdateFailed(
+                f"Failed to set DJI Romo voice language: {err}"
+            ) from err
+        except DjiRomoApiError as err:
+            raise UpdateFailed(
+                f"Failed to set DJI Romo voice language: {err}"
+            ) from err
+        self._static_fetched_at = None
+        await self.async_request_refresh()
+
     async def async_run_dock_action(self, action: str) -> None:
         """Run a dock action and surface auth failures."""
         action_map = {

@@ -211,6 +211,18 @@ SETTING_SELECTS: tuple[DjiRomoSettingSelectDescription, ...] = (
     ),
 )
 
+# Robot voice language. This is NOT a settings write — it triggers a voicepack
+# module upgrade (see coordinator.async_set_voice_language). Only the languages
+# whose voicepack module_type was MITM-confirmed (2026-06-22) are offered; the
+# robot likely supports more, but their codes are unconfirmed. Label -> code.
+VOICE_LANGUAGES: dict[str, str] = {
+    "French": "fr",
+    "English": "en",
+    "Chinese (Simplified)": "zh",
+    "Korean": "ko",
+    "German": "de",
+}
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -226,6 +238,7 @@ async def async_setup_entry(
         DjiRomoSettingSelect(coordinator, description)
         for description in SETTING_SELECTS
     )
+    entities.append(DjiRomoVoiceLanguageSelect(coordinator))
     async_add_entities(entities)
 
 
@@ -294,6 +307,42 @@ class DjiRomoSettingSelect(DjiRomoCoordinatorEntity, SelectEntity):
             await self.coordinator.async_set_device_setting(
                 lambda: self.entity_description.param_fn(self.coordinator, value)
             )
+        except UpdateFailed as err:
+            raise HomeAssistantError(
+                f"Failed to set DJI Romo '{self.name}': {err}"
+            ) from err
+
+
+class DjiRomoVoiceLanguageSelect(DjiRomoCoordinatorEntity, SelectEntity):
+    """Robot voice language — writes a voicepack module upgrade, not a setting.
+
+    Reads the current language from ``settings.device_language`` (the value the
+    robot reports once a pack is installed); selecting a new option triggers the
+    async voicepack download. The displayed value catches up on later polls.
+    """
+
+    _attr_translation_key = "voice_language"
+    _attr_icon = "mdi:translate"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator: DjiRomoCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.device_sn}_voice_language"
+        self._attr_options = list(VOICE_LANGUAGES)
+
+    @property
+    def current_option(self) -> str | None:
+        """Return the label matching the active language code (None if unknown)."""
+        code = _setting(self.coordinator, "device_language")
+        for label, lang_code in VOICE_LANGUAGES.items():
+            if lang_code == code:
+                return label
+        return None
+
+    async def async_select_option(self, option: str) -> None:
+        """Trigger a voicepack upgrade to the chosen language."""
+        try:
+            await self.coordinator.async_set_voice_language(VOICE_LANGUAGES[option])
         except UpdateFailed as err:
             raise HomeAssistantError(
                 f"Failed to set DJI Romo '{self.name}': {err}"

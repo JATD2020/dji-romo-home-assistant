@@ -346,6 +346,21 @@ class DjiRomoApiClient:
             json={"double_check": False, "param": param},
         )
 
+    async def async_set_voice_language(self, lang_code: str) -> None:
+        """Switch the robot's voice language by upgrading its voicepack module.
+
+        Language is NOT a settings write: the app POSTs a module upgrade and the
+        robot downloads/installs the voicepack asynchronously. The settings
+        ``device_language`` field only reflects the new language once installed.
+        Endpoint + body captured via MITM 2026-06-22
+        (``{"module_type": "voicepack_<code>"}``).
+        """
+        await self._device_request(
+            "POST",
+            "moduleFile/upgrade",
+            json={"module_type": f"voicepack_{lang_code}"},
+        )
+
     async def async_get_consumables(self) -> list[dict[str, Any]]:
         """Fetch robot consumable status."""
         payload = await self._device_request("GET", "consumables")
