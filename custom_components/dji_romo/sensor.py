@@ -326,6 +326,7 @@ SENSORS: tuple[DjiRomoSensorDescription, ...] = (
     DjiRomoSensorDescription(
         key="distance_to_dock",
         name="Distance to Dock",
+        entity_registry_enabled_default=False,
         native_unit_of_measurement=UnitOfLength.METERS,
         device_class=SensorDeviceClass.DISTANCE,
         state_class=SensorStateClass.MEASUREMENT,

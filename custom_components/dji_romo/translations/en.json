@@ -308,6 +308,9 @@
     "image": {
       "map": {
         "name": "Map"
+      },
+      "last_clean_map": {
+        "name": "Last Cleaning"
       }
     },
     "event": {

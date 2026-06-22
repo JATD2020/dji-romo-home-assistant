@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 import logging
@@ -161,6 +160,16 @@ class RomoSnapshot:
     total_cleanings: int | None = None
     # Floor plan polygons from seg_map.poly_info (each has vertices, poly_label, etc.)
     floor_plan_polys: list[dict[str, Any]] = field(default_factory=list)
+    grid_map_data: dict[str, Any] | None = None
+    # The last *completed* cleaning's full report map (rooms + grid + obstacles +
+    # carpets + restricted zones + the dense ``history_path`` sweep trace +
+    # robot_pos/station_pos), fetched from the per-job room_map snapshot. Rendered
+    # by the "Last Cleaning" image. Refetched only when the newest finished job
+    # changes (it is a ~650 KB blob).
+    last_clean_map: dict[str, Any] | None = None
+    carpet_polys: list[dict[str, Any]] = field(default_factory=list)
+    restricted_polys: list[dict[str, Any]] = field(default_factory=list)
+    virtual_walls: list[dict[str, Any]] = field(default_factory=list)
     # Point obstacles from obstacle_layer in live_map_update (furniture legs, toys, etc.)
     obstacles: list[tuple[float, float]] = field(default_factory=list)
     # Dock drying state, from the MQTT drying_progress event (dust box / mop drying).
@@ -206,6 +215,9 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         # fast cleaning poll doesn't refetch them every cycle.
         self._static_cache: dict[str, Any] | None = None
         self._static_fetched_at: datetime | None = None
+        # UUID of the completed job whose report map is cached in the snapshot, so we
+        # only refetch the (large) room_map when a newer finished job appears.
+        self._last_clean_map_uuid: str | None = None
         self._mqtt_credentials: DjiMqttCredentials | None = None
         # No connection-lost callback: paho auto-reconnects transient broker
         # drops seamlessly with the same client (and re-subscribes via on_connect).
@@ -254,7 +266,7 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         )
 
         if self.data is not None:
-            snapshot = deepcopy(self.data)
+            snapshot = replace(self.data)
         else:
             snapshot = RomoSnapshot()
             self._seed_from_restore(snapshot)
@@ -320,7 +332,7 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
 
     async def async_clear_trajectory(self) -> None:
         """Clear the accumulated sweep trace and forget the persisted copy."""
-        snapshot = deepcopy(self.data) if self.data else RomoSnapshot()
+        snapshot = replace(self.data) if self.data else RomoSnapshot()
         snapshot.trajectory = []
         snapshot.last_updated = datetime.now(UTC)
         await self._store.async_remove()
@@ -468,11 +480,48 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         )
         if should_fetch_floor_plan:
             try:
-                polys = await self.api.async_get_floor_plan()
-                if polys:
-                    snapshot.floor_plan_polys = polys
+                map_data = await self.api.async_get_map_data()
+                if map_data:
+                    poly_info = map_data.get("seg_map", {}).get("poly_info")
+                    if poly_info:
+                        snapshot.floor_plan_polys = poly_info
+                    snapshot.grid_map_data = map_data.get("grid_map")
+                    
+                    carpet = map_data.get("carpet_layer", {})
+                    if carpet and isinstance(carpet.get("data"), list):
+                        snapshot.carpet_polys = carpet["data"]
+                        
+                    restricted = map_data.get("restricted_layer", {})
+                    if restricted and isinstance(restricted.get("data"), list):
+                        snapshot.restricted_polys = restricted["data"]
+                        
+                    vw = map_data.get("virtual_wall", {})
+                    if vw and isinstance(vw.get("data"), list):
+                        snapshot.virtual_walls = vw["data"]
             except Exception:  # noqa: BLE001
                 pass  # Non-fatal: map overlay continues working without floor plan
+
+        # Fetch the last *completed* cleaning's report map (rooms + grid + layers +
+        # the history_path sweep trace) for the "Last Cleaning" image — only when the
+        # newest finished job changes, since the room_map blob is ~650 KB.
+        last_completed = next(
+            (
+                j
+                for j in jobs
+                if str(j.get("status", "")).lower() in TERMINAL_JOB_STATUSES
+                and j.get("uuid")
+            ),
+            None,
+        )
+        completed_uuid = last_completed.get("uuid") if last_completed else None
+        if completed_uuid and completed_uuid != self._last_clean_map_uuid:
+            try:
+                report_map = await self.api.async_get_job_room_map(completed_uuid)
+            except Exception:  # noqa: BLE001
+                report_map = None
+            if report_map and report_map.get("history_path"):
+                snapshot.last_clean_map = report_map
+                self._last_clean_map_uuid = completed_uuid
 
         self._update_device_info(properties)
 
@@ -528,7 +577,7 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
                 f"Command mapping for '{command_key}' is not configured."
             )
 
-        envelope = {"method": mapping} if isinstance(mapping, str) else deepcopy(mapping)
+        envelope = {"method": mapping} if isinstance(mapping, str) else dict(mapping)
 
         method = envelope.pop("method", command_key)
         data = envelope.pop("data", {})
@@ -677,7 +726,7 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             data={**self.entry.data, key: int(value)},
             options=cleaned_options,
         )
-        self.async_set_updated_data(deepcopy(self.data) if self.data else RomoSnapshot())
+        self.async_set_updated_data(replace(self.data) if self.data else RomoSnapshot())
 
     async def async_run_dock_action(self, action: str) -> None:
         """Run a dock action and surface auth failures."""
@@ -1174,6 +1223,8 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             pts: list[tuple[float, float]] = []
             for item in obs_data:
                 verts = item.get("vertices") or []
+                if not verts and "position" in item:
+                    verts = [item["position"]]
                 for v in verts:
                     x = v.get("x")
                     y = v.get("y")
