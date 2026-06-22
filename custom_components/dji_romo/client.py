@@ -264,6 +264,23 @@ class DjiRomoApiClient:
         payload = await self._request("/app/api/v1/homes")
         return payload.get("data", {}).get("homes", [])
 
+    async def async_get_live_paths(
+        self, bid: str, start_index: int
+    ) -> dict[str, Any] | None:
+        """Fetch incremental path points for an active cleaning job.
+
+        Returns the raw API response dict, or None on any error.
+        Endpoint: GET /cr/app/api/v1/devices/{SN}/paths?bid=...&start_index=...
+        """
+        try:
+            return await self._device_request(
+                "GET",
+                "paths",
+                params={"bid": bid, "start_index": start_index},
+            )
+        except DjiRomoApiError:
+            return None
+
     async def async_get_jobs(self, limit: int = 10) -> list[dict[str, Any]]:
         """Fetch the most recent cleaning jobs, newest first."""
         jobs, _total = await self.async_get_jobs_and_total(limit)

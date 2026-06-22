@@ -167,6 +167,7 @@ class RomoSnapshot:
     # by the "Last Cleaning" image. Refetched only when the newest finished job
     # changes (it is a ~650 KB blob).
     last_clean_map: dict[str, Any] | None = None
+    last_clean_map_uuid: str | None = None
     carpet_polys: list[dict[str, Any]] = field(default_factory=list)
     restricted_polys: list[dict[str, Any]] = field(default_factory=list)
     virtual_walls: list[dict[str, Any]] = field(default_factory=list)
@@ -232,10 +233,8 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         self._pending_activity_count = 0
         self._held_activity: str | None = None
         self._activity_hold_until: datetime | None = None
-        # True only during the actual floor-sweeping phase (cur_submission
-        # "cover_tree"), from room_clean_progress. Gates trajectory accumulation so
-        # the trace covers only where the robot really cleans, like the DJI app.
-        self._sweeping = False
+        self._paths_unsub: CALLBACK_TYPE | None = None
+        self._paths_next_index: int = 0
         # Persisted trajectory so the live map survives a Home Assistant restart.
         self._store: Store[dict[str, Any]] = Store(
             hass,
@@ -310,6 +309,60 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             if isinstance(value, (int, float)):
                 setattr(snapshot, attr, float(value))
 
+    def _start_paths_poll(self) -> None:
+        """Start the 2-second /paths polling loop."""
+        self._stop_paths_poll()
+        self._paths_unsub = async_track_time_interval(
+            self.hass,
+            self._async_poll_paths,
+            timedelta(seconds=2),
+        )
+
+    def _stop_paths_poll(self) -> None:
+        """Cancel the /paths polling loop if running."""
+        if self._paths_unsub is not None:
+            self._paths_unsub()
+            self._paths_unsub = None
+
+    async def _async_poll_paths(self, _now: datetime) -> None:
+        """Fetch incremental /paths points and append them to the live trace."""
+        if not self.data:
+            return
+        bid = self.data.mission_bid
+        if not bid or self.data.activity != "cleaning":
+            self._stop_paths_poll()
+            return
+
+        result = await self.api.async_get_live_paths(bid, self._paths_next_index)
+        if result is None:
+            return
+
+        data = (result.get("data") or {})
+        raw_pts: list[list[float]] = data.get("history_path") or []
+        if not raw_pts:
+            return
+
+        # Keep only drawn pass types; x/y are cols 0/1, type is col 4.
+        DRAWN_TYPES = {48, 80, 112}
+        new_pts = [
+            (float(pt[0]), float(pt[1]))
+            for pt in raw_pts
+            if len(pt) >= 5 and int(pt[4]) in DRAWN_TYPES
+        ]
+        new_end: int = data.get("end_index", self._paths_next_index)
+        if new_end > self._paths_next_index:
+            self._paths_next_index = new_end
+
+        if not new_pts:
+            return
+
+        # Merge into existing trajectory (cap at TRAJECTORY_MAX_POINTS).
+        prev = self.data.trajectory
+        merged = list(prev[-(TRAJECTORY_MAX_POINTS - len(new_pts)):]) + new_pts
+        snapshot = replace(self.data, trajectory=merged)
+        self.async_set_updated_data(snapshot)
+        self._schedule_trajectory_save(snapshot)
+
     @callback
     def _schedule_trajectory_save(self, snapshot: RomoSnapshot) -> None:
         """Persist the trajectory/positions (debounced) so it survives restarts.
@@ -334,6 +387,7 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         """Clear the accumulated sweep trace and forget the persisted copy."""
         snapshot = replace(self.data) if self.data else RomoSnapshot()
         snapshot.trajectory = []
+        self._paths_next_index = 0
         snapshot.last_updated = datetime.now(UTC)
         await self._store.async_remove()
         self._restored = None
@@ -522,6 +576,8 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             if report_map and report_map.get("history_path"):
                 snapshot.last_clean_map = report_map
                 self._last_clean_map_uuid = completed_uuid
+        
+        snapshot.last_clean_map_uuid = self._last_clean_map_uuid
 
         self._update_device_info(properties)
 
@@ -979,28 +1035,10 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             # trace so the map shows only the current run (matching the DJI app).
             new_bid = _pick_first(flattened, ("mission_bid",))
             new_bid = str(new_bid) if new_bid else None
-            if new_bid and new_bid != previous.mission_bid:
+            if new_bid and new_bid != "0" and new_bid != previous.mission_bid:
                 snapshot.trajectory = []
-
-            # Trace the robot's sweep path. Accumulate a point only while actually
-            # sweeping (self._sweeping, from room_clean_progress) so navigation and
-            # docking are not drawn. Persisted so it survives a HA restart. 5 cm
-            # threshold trims duplicate samples.
-            if (
-                self._sweeping
-                and snapshot.robot_x is not None
-                and snapshot.robot_y is not None
-            ):
-                pt = (snapshot.robot_x, snapshot.robot_y)
-                prev_traj = snapshot.trajectory
-                if not prev_traj or (
-                    abs(pt[0] - prev_traj[-1][0]) > 0.05
-                    or abs(pt[1] - prev_traj[-1][1]) > 0.05
-                ):
-                    snapshot.trajectory = (
-                        list(prev_traj[-(TRAJECTORY_MAX_POINTS - 1):]) + [pt]
-                    )
-                    self._schedule_trajectory_save(snapshot)
+                self._paths_next_index = 0
+                self._stop_paths_poll()
 
             battery_level = _coerce_int(
                 _pick_first(
@@ -1046,7 +1084,9 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             if topic_kind == "property":
                 mission_bid = _pick_first(flattened, ("mission_bid",))
                 if mission_bid is not None:
-                    snapshot.mission_bid = str(mission_bid) or None
+                    bid_str = str(mission_bid) or None
+                    if bid_str and bid_str != "0":
+                        snapshot.mission_bid = bid_str
                 status_text = _pick_first(
                     flattened,
                     (
@@ -1071,9 +1111,6 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
                     candidate_activity,
                     source="property",
                 )
-                # Any non-cleaning state ends the sweep phase.
-                if snapshot.activity != "cleaning":
-                    self._sweeping = False
                 # Clear the live "current clean" figures once the run is over.
                 if snapshot.activity in {"docked", "idle"}:
                     snapshot.clean_progress = None
@@ -1083,10 +1120,7 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
                     snapshot.active_poly_index = None
                     snapshot.active_step = None
             elif topic_kind == "events":
-                # room_clean_progress tells us if the robot is in the sweep phase
-                # (cur_submission "cover_tree") vs navigating/docking.
                 if str(payload.get("method")) == "room_clean_progress":
-                    self._sweeping = _is_sweeping(flattened)
                     # Live progress figures for the current job.
                     percent = _coerce_int(_pick_first(flattened, ("percent",)))
                     if percent is not None:
@@ -1135,6 +1169,11 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
                 candidate_activity,
                 source="other",
             )
+
+        if snapshot.activity == "cleaning" and snapshot.mission_bid and self._paths_unsub is None:
+            self._start_paths_poll()
+        elif snapshot.activity in {"docked", "idle", "error"} and self._paths_unsub is not None:
+            self._stop_paths_poll()
 
         if not _meaningful_state_changed(previous, snapshot):
             return
@@ -1551,28 +1590,6 @@ def _infer_property_activity(
     if previous_activity in {"docked", "returning", "paused", "cleaning"}:
         return previous_activity
     return "idle"
-
-
-def _is_sweeping(flattened: dict[str, Any]) -> bool:
-    """Return True when a room_clean_progress event is in the floor-sweeping phase.
-
-    The DJI app traces only where the robot actually sweeps, not while it drives
-    between rooms or returns to dock. The progress event's sub_job_status reports
-    submission_state "running" and cur_submission "cover_tree" (with a sweep/mop
-    display key) during sweeping; other submissions (go_home, wash, dry, dust) do
-    not, so they leave sweeping False.
-    """
-    if str(_pick_first(flattened, ("status",))).lower() != "in_progress":
-        return False
-    submission_state = str(_pick_first(flattened, ("submission_state",))).lower()
-    if submission_state not in {"running", "in_progress"}:
-        return False
-    cur_submission = str(_pick_first(flattened, ("cur_submission",))).lower()
-    display_key = str(_pick_first(flattened, ("display_text_key",))).lower()
-    if any(term in cur_submission for term in ("cover", "sweep", "mop", "clean")):
-        return True
-    return any(term in display_key for term in ("sweep", "mop"))
-
 
 def _infer_event_activity(
     flattened: dict[str, Any],
