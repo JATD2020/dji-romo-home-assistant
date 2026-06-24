@@ -314,6 +314,15 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             if isinstance(value, (int, float)):
                 setattr(snapshot, attr, float(value))
 
+        # Restore the last live grid + floor plan so the map isn't blank after a
+        # restart (until the REST seed / next live_map_update refreshes them).
+        grid_map_data = self._restored.get("grid_map_data")
+        if isinstance(grid_map_data, dict) and grid_map_data.get("map_data"):
+            snapshot.grid_map_data = grid_map_data
+        floor_plan_polys = self._restored.get("floor_plan_polys")
+        if isinstance(floor_plan_polys, list) and floor_plan_polys:
+            snapshot.floor_plan_polys = floor_plan_polys
+
     def _start_paths_poll(self) -> None:
         """Start the 2-second /paths polling loop."""
         self._stop_paths_poll()
@@ -370,23 +379,35 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
 
     @callback
     def _schedule_trajectory_save(self, snapshot: RomoSnapshot) -> None:
-        """Persist the trajectory/positions (debounced) so it survives restarts.
+        """Persist the live map state (debounced) so it survives restarts.
 
-        The trajectory is downsampled for storage so a long session doesn't write
+        Covers the cleaning trace + robot/dock positions and the live occupancy
+        grid + floor plan (both pushed via MQTT, ~19 KB, so a restart shows the last
+        known map instantly instead of a blank grid until the next cloud fetch). The
+        trajectory is downsampled for storage so a long session doesn't write
         thousands of points to disk on every debounced save; the live in-memory
-        trace keeps full resolution.
+        trace keeps full resolution. Debounced (TRAJECTORY_SAVE_DELAY), so even the
+        2 Hz live_map_update stream only writes ~once per 30 s.
         """
-        data = {
-            "trajectory": [
-                list(p) for p in _downsample(snapshot.trajectory, TRAJECTORY_STORAGE_POINTS)
-            ],
-            "robot_x": snapshot.robot_x,
-            "robot_y": snapshot.robot_y,
-            "robot_yaw": snapshot.robot_yaw,
-            "dock_x": snapshot.dock_x,
-            "dock_y": snapshot.dock_y,
-        }
-        self._store.async_delay_save(lambda: data, TRAJECTORY_SAVE_DELAY)
+        # Build the payload lazily inside the callback: async_delay_save is debounced,
+        # so this only runs ~once per 30 s at write time instead of on every (2 Hz)
+        # call — the trajectory downsample isn't recomputed on each live_map_update.
+        def _payload() -> dict[str, Any]:
+            return {
+                "trajectory": [
+                    list(p)
+                    for p in _downsample(snapshot.trajectory, TRAJECTORY_STORAGE_POINTS)
+                ],
+                "robot_x": snapshot.robot_x,
+                "robot_y": snapshot.robot_y,
+                "robot_yaw": snapshot.robot_yaw,
+                "dock_x": snapshot.dock_x,
+                "dock_y": snapshot.dock_y,
+                "grid_map_data": snapshot.grid_map_data,
+                "floor_plan_polys": snapshot.floor_plan_polys,
+            }
+
+        self._store.async_delay_save(_payload, TRAJECTORY_SAVE_DELAY)
 
     async def async_clear_trajectory(self) -> None:
         """Clear the accumulated sweep trace and forget the persisted copy."""
@@ -1332,13 +1353,19 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             if pts:
                 snapshot.obstacles = pts
 
-        # We intentionally do NOT use grid_map for the cleaning trace: it is the
-        # cumulative/persistent SLAM coverage (it still shows rooms from previous
-        # sessions), so it does not match the app's per-session view. The trace is
-        # built from the live sweep path instead (see _handle_mqtt_message). We only
-        # take the floor plan and obstacles from this message.
+        # Occupancy grid (walls + scanned objects/furniture). DJI pushes the full
+        # grid here at ~2 Hz, in the same format decode_grid_cells/image.py already
+        # render, so we keep it current — this is what makes the grid grow live like
+        # the app. (We still do NOT use grid_map as the cleaning *trace*: it is the
+        # cumulative SLAM coverage and doesn't match the app's per-session sweep; the
+        # trace is built from the live /paths sweep instead.)
+        grid_map = map_data.get("grid_map")
+        if isinstance(grid_map, dict) and grid_map.get("map_data"):
+            snapshot.grid_map_data = grid_map
 
         self.async_set_updated_data(snapshot)
+        # Persist the live floor plan + grid (debounced) so they survive a restart.
+        self._schedule_trajectory_save(snapshot)
 
     def _stable_activity(
         self,
