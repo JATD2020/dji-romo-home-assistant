@@ -20,12 +20,37 @@ from .rooms import duplicate_label_ids, room_name
 PARALLEL_UPDATES = 0
 
 _ROBOT_MARKER_SIZE = 15
+# Apparent diameter (metres) of the robot's live-position marker. Sized to the map
+# scale like the trace/obstacles rather than as a fixed pixel blob. Deliberately a bit
+# larger than the robot's true 33 cm footprint so the position icon stays legible (a
+# 33 cm icon is too small to read), while still tracking the map zoom. Floored at
+# _ROBOT_MARKER_MIN_PX only for extreme zoom-out.
+_ROBOT_DIAM_M = 0.45
+_ROBOT_MARKER_MIN_PX = 4
+# Diameter (metres) of the circular drop-shadow under the robot, ~1.2x the marker so
+# it reads as a soft halo just beyond the icon's edge. Drawn inside the marker's scaled
+# group, so it tracks the map zoom and stays this physical size.
+_ROBOT_SHADOW_DIAM_M = 0.54
+# Height (metres) of the charging-station marker's taller dimension, kept slightly
+# larger than the robot icon so the dock reads as a touch bigger. The nominal marker
+# art is 10 wide x 12 tall; it's scaled to the map zoom like the robot, floored at
+# _DOCK_MARKER_MIN_PX so it stays visible when zoomed out.
+_DOCK_HEIGHT_M = 0.50
+_DOCK_MARKER_MIN_PX = 5
 _ROBOT_IMAGE_HEADING_OFFSET = 90.0
 _ROBOT_TOP_IMAGE = Path(__file__).parent / "robot_top.png"
 # Approx. floor width the robot sweeps in one pass (metres). Drawn as the light-blue
 # "cleaned area" halo behind the dark centre-line trace, matching the DJI app where
 # the swath = the robot's width and the dark line = the robot's centre path.
 _CLEAN_SWATH_WIDTH_M = 0.33
+# Width of the dark centre-line trace (metres of floor). Like the halo it scales
+# with the map zoom, so the trace keeps the same look whatever the map size.
+_CENTRE_LINE_WIDTH_M = 0.015
+# Physical diameter (metres) used to draw a detected obstacle, matching the robot's
+# own footprint (~33 cm). The circle scales with the map zoom like the trace, so an
+# obstacle keeps a real-world size instead of a fixed pixel blob; floored at 2 px so
+# it stays visible on small maps.
+_OBSTACLE_DIAM_M = 0.33
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -171,13 +196,15 @@ def _emit_trace(
     parts: list[str],
     segs: list[list[tuple[float, float]]],
     halo_width: float,
+    line_width: float,
 ) -> None:
     """Draw the cleaning trace the way the DJI app does.
 
     A wide light-blue halo (``halo_width`` ≈ the robot's width at the current map
     scale) represents the floor swept under the robot, with a thin dark-blue
-    centre-line on top for the robot's path. All halos are drawn first, then all
-    lines, so a centre-line is never covered by a neighbouring band's halo.
+    centre-line (``line_width``) on top for the robot's path. Both scale with the
+    map zoom. All halos are drawn first, then all lines, so a centre-line is never
+    covered by a neighbouring band's halo.
     """
     for band in segs:
         pstr = " ".join(f"{x},{y}" for x, y in band)
@@ -188,7 +215,7 @@ def _emit_trace(
     for band in segs:
         pstr = " ".join(f"{x},{y}" for x, y in band)
         parts.append(
-            f'<polyline points="{pstr}" fill="none" stroke="#1a5fc4" stroke-width="0.5" '
+            f'<polyline points="{pstr}" fill="none" stroke="#1a5fc4" stroke-width="{line_width}" '
             f'stroke-linejoin="round" stroke-linecap="round" opacity="1"/>'
         )
 
@@ -384,28 +411,25 @@ def _generate_map_svg(data: RomoSnapshot, robot_image_uri: str | None = None) ->
 
     # Cleaning trace: light-blue swept-area halo (robot width) + dark centre-line.
     halo_w = round(max(_CLEAN_SWATH_WIDTH_M * scale, 2.0), 1)
+    line_w = round(_CENTRE_LINE_WIDTH_M * scale, 2)
     segs = _band_trajectory(trajectory, to_svg)
     if not segs and trajectory:
         sx, sy = to_svg(*trajectory[-1])
         parts.append(f'<circle cx="{sx}" cy="{sy}" r="{round(halo_w / 2, 1)}" fill="#aacef4" opacity="0.5"/>')
         parts.append(f'<circle cx="{sx}" cy="{sy}" r="1.3" fill="#1a5fc4"/>')
-    _emit_trace(parts, segs, halo_w)
+    _emit_trace(parts, segs, halo_w, line_w)
 
     # Dock marker
     if dock_x is not None and dock_y is not None:
         sx, sy = to_svg(dock_x, dock_y)
-        parts.append(
-            f'<g transform="translate({sx} {sy}) scale(0.6)">'
-            f'<rect x="-5" y="-6" width="10" height="12" rx="2" fill="#151515"/>'
-            f'<path d="M 1,-3.5 L -2,0.5 H -0.5 L -1.5,4 L 2,-0.5 H 0.5 Z" fill="white"/>'
-            f'</g>'
-        )
+        parts.append(_dock_marker_svg(sx, sy, scale))
 
-    # Detected obstacles (orange circles)
+    # Detected obstacles (orange circles), sized like the robot footprint.
+    obstacle_r = round(max(_OBSTACLE_DIAM_M / 2 * scale, 2.0), 1)
     for ox, oy in data.obstacles:
         sx, sy = to_svg(ox, oy)
         parts.append(
-            f'<circle cx="{sx}" cy="{sy}" r="3.6" fill="#ff9614" stroke="#3c2800" stroke-width="0.5"/>'
+            f'<circle cx="{sx}" cy="{sy}" r="{obstacle_r}" fill="#ff9614" stroke="#3c2800" stroke-width="0.5"/>'
         )
 
     # Robot marker
@@ -418,6 +442,7 @@ def _generate_map_svg(data: RomoSnapshot, robot_image_uri: str | None = None) ->
                 data.robot_yaw,
                 map_rotation,
                 robot_image_uri,
+                scale,
             )
         )
 
@@ -669,43 +694,33 @@ def _generate_report_svg(data: RomoSnapshot, robot_image_uri: str | None = None)
     # trace still shows at end-of-session and after a Home Assistant reload.
     if not segs and data.trajectory:
         segs = _band_trajectory(data.trajectory, to_svg)
-    _emit_trace(parts, segs, round(max(_CLEAN_SWATH_WIDTH_M * scale, 2.0), 1))
+    _emit_trace(
+        parts,
+        segs,
+        round(max(_CLEAN_SWATH_WIDTH_M * scale, 2.0), 1),
+        round(_CENTRE_LINE_WIDTH_M * scale, 2),
+    )
 
-    # Obstacles (orange).
+    # Obstacles (orange), sized like the robot footprint.
+    obstacle_r = round(max(_OBSTACLE_DIAM_M / 2 * scale, 2.0), 1)
     for o in (report_map.get("obstacle_layer") or {}).get("data", []):
         vs = o.get("vertices", [])
         if vs:
             sx, sy = to_svg(vs[0]["x"], vs[0]["y"])
             parts.append(
-                f'<circle cx="{sx}" cy="{sy}" r="3.6" fill="#ff9614" '
+                f'<circle cx="{sx}" cy="{sy}" r="{obstacle_r}" fill="#ff9614" '
                 f'stroke="#3c2800" stroke-width="0.5"/>'
             )
 
-    # Station (orange ring) + robot (green dot).
+    # Station marker only. The robot marker is deliberately omitted on the report:
+    # this is a frozen end-of-job snapshot, so the job's robot_pos reflects where the
+    # robot stopped (often offset from the dock by its body, in whatever direction it
+    # was facing) and would render misaligned with the dock. The live map shows the
+    # current robot position instead.
     st = report_map.get("station_pos") or {}
     if st.get("station_position_x") is not None:
         sx, sy = to_svg(st["station_position_x"], st["station_position_y"])
-        parts.append(
-            f'<g transform="translate({sx} {sy}) scale(0.6)">'
-            f'<rect x="-5" y="-6" width="10" height="12" rx="2" fill="#151515"/>'
-            f'<path d="M 1,-3.5 L -2,0.5 H -0.5 L -1.5,4 L 2,-0.5 H 0.5 Z" fill="white"/>'
-            f'</g>'
-        )
-    rb = report_map.get("robot_pos") or {}
-    if rb.get("crobot_position_x") is not None:
-        sx, sy = to_svg(rb["crobot_position_x"], rb["crobot_position_y"])
-        yaw = None
-        if "crobot_direction" in rb:
-            yaw = degrees(rb["crobot_direction"])
-        parts.append(
-            _robot_marker_svg(
-                sx,
-                sy,
-                yaw,
-                map_rotation,
-                robot_image_uri,
-            )
-        )
+        parts.append(_dock_marker_svg(sx, sy, scale))
 
     # Room labels.
     for p in polys:
@@ -797,16 +812,50 @@ def _map_alignment_rotation(polys: list[dict]) -> float:
     return round(rotation, 2) if abs(rotation) <= 15 else 0.0
 
 
+def _robot_marker_scale(map_scale: float) -> float:
+    """Multiplier mapping the nominal _ROBOT_MARKER_SIZE marker to the map scale.
+
+    Targets the robot's real footprint (_ROBOT_DIAM_M) at the current map zoom,
+    floored at _ROBOT_MARKER_MIN_PX so the icon stays legible. Returns 1.0 when the
+    scale is unknown (<= 0), keeping the original fixed size.
+    """
+    if map_scale <= 0:
+        return 1.0
+    target_px = max(_ROBOT_DIAM_M * map_scale, _ROBOT_MARKER_MIN_PX)
+    return round(target_px / _ROBOT_MARKER_SIZE, 3)
+
+
+def _dock_marker_svg(sx: float, sy: float, map_scale: float = 0.0) -> str:
+    """Return the charging-station marker, sized a touch larger than the robot.
+
+    The nominal art is 10 wide x 12 tall; it's scaled so its height tracks the map
+    zoom at _DOCK_HEIGHT_M (just above the robot's diameter), floored at
+    _DOCK_MARKER_MIN_PX. Falls back to the original fixed 0.6 when the scale is
+    unknown (<= 0).
+    """
+    if map_scale <= 0:
+        k = 0.6
+    else:
+        k = round(max(_DOCK_HEIGHT_M * map_scale, _DOCK_MARKER_MIN_PX) / 12.0, 3)
+    return (
+        f'<g transform="translate({sx} {sy}) scale({k})">'
+        f'<rect x="-5" y="-6" width="10" height="12" rx="2" fill="#151515"/>'
+        f'<path d="M 1,-3.5 L -2,0.5 H -0.5 L -1.5,4 L 2,-0.5 H 0.5 Z" fill="white"/>'
+        f'</g>'
+    )
+
+
 def _robot_marker_svg(
     sx: float,
     sy: float,
     yaw: float | None,
     map_rotation: float = 0.0,
     image_uri: str | None = None,
+    map_scale: float = 0.0,
 ) -> str:
     """Return the cropped Romo top-view marker centred on the robot position."""
     if image_uri is None:
-        return _robot_marker_fallback_svg(sx, sy, yaw, map_rotation)
+        return _robot_marker_fallback_svg(sx, sy, yaw, map_rotation, map_scale)
 
     rotation = (
         0
@@ -816,12 +865,20 @@ def _robot_marker_svg(
     size = _ROBOT_MARKER_SIZE
     x = round(sx - size / 2, 1)
     y = round(sy - size / 2, 1)
+    # Scale the whole marker (image + shadow) uniformly about the robot centre so it
+    # tracks the map zoom while keeping its tuned proportions.
+    k = _robot_marker_scale(map_scale)
+    # Circular drop-shadow ~40 cm across (slightly larger than the robot). In nominal
+    # marker units the robot image spans _ROBOT_MARKER_SIZE for _ROBOT_DIAM_M, so the
+    # shadow radius scales from that ratio; centred on the robot so rotation is a no-op.
+    shadow_r = round(_ROBOT_MARKER_SIZE / 2 * (_ROBOT_SHADOW_DIAM_M / _ROBOT_DIAM_M), 1)
     return (
+        f'<g transform="translate({sx} {sy}) scale({k}) translate({-sx} {-sy})">'
+        f'<circle cx="{sx}" cy="{sy}" r="{shadow_r}" fill="#0f1720" opacity="0.22"/>'
         f'<g transform="rotate({rotation} {sx} {sy})">'
-        f'<ellipse cx="{sx}" cy="{round(sy + 1.5, 1)}" rx="9.5" ry="7" '
-        f'fill="#0f1720" opacity="0.22"/>'
         f'<image href="{image_uri}" x="{x}" y="{y}" width="{size}" height="{size}" '
         f'preserveAspectRatio="xMidYMid meet"/>'
+        f'</g>'
         f'</g>'
     )
 
@@ -840,12 +897,15 @@ def _robot_marker_fallback_svg(
     sy: float,
     yaw: float | None,
     map_rotation: float = 0.0,
+    map_scale: float = 0.0,
 ) -> str:
     """Return a compact vector marker if the PNG asset is unavailable."""
     rotation = 0 if yaw is None else round(-yaw - map_rotation, 1)
     x = round(sx - 10, 1)
     y = round(sy - 8, 1)
-    scale = round(_ROBOT_MARKER_SIZE / 26.0, 2)
+    # Same map-scale sizing as the image marker, folded into this marker's own
+    # base scale so the vector glyph tracks the map zoom too.
+    scale = round(_ROBOT_MARKER_SIZE / 26.0 * _robot_marker_scale(map_scale), 3)
     return (
         f'<g transform="translate({sx} {sy}) rotate({rotation}) scale({scale}) translate({-sx} {-sy})">'
         f'<ellipse cx="{sx}" cy="{sy}" rx="12" ry="9.5" fill="#0f1720" opacity="0.22"/>'
