@@ -22,6 +22,10 @@ PARALLEL_UPDATES = 0
 _ROBOT_MARKER_SIZE = 15
 _ROBOT_IMAGE_HEADING_OFFSET = 90.0
 _ROBOT_TOP_IMAGE = Path(__file__).parent / "robot_top.png"
+# Approx. floor width the robot sweeps in one pass (metres). Drawn as the light-blue
+# "cleaned area" halo behind the dark centre-line trace, matching the DJI app where
+# the swath = the robot's width and the dark line = the robot's centre path.
+_CLEAN_SWATH_WIDTH_M = 0.33
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -136,6 +140,57 @@ _EMPTY_SVG = (
     'font-family="sans-serif">No position data yet</text>'
     '</svg>'
 )
+
+
+def _band_trajectory(
+    trajectory: list[tuple[float, float]],
+    to_svg,
+) -> list[list[tuple[float, float]]]:
+    """Split the live (x, y) trajectory into svg-point bands.
+
+    A jump > 0.6 m breaks the polyline (transit moves leave a gap, matching the
+    app). Returned bands have >= 2 points; single-point runs are dropped.
+    """
+    segs: list[list[tuple[float, float]]] = []
+    band: list[tuple[float, float]] = []
+    prev_pt: tuple[float, float] | None = None
+    for x, y in trajectory:
+        if prev_pt is not None and ((x - prev_pt[0]) ** 2 + (y - prev_pt[1]) ** 2) ** 0.5 <= 0.6:
+            band.append(to_svg(x, y))
+        else:
+            if len(band) > 1:
+                segs.append(band)
+            band = [to_svg(x, y)]
+        prev_pt = (x, y)
+    if len(band) > 1:
+        segs.append(band)
+    return segs
+
+
+def _emit_trace(
+    parts: list[str],
+    segs: list[list[tuple[float, float]]],
+    halo_width: float,
+) -> None:
+    """Draw the cleaning trace the way the DJI app does.
+
+    A wide light-blue halo (``halo_width`` ≈ the robot's width at the current map
+    scale) represents the floor swept under the robot, with a thin dark-blue
+    centre-line on top for the robot's path. All halos are drawn first, then all
+    lines, so a centre-line is never covered by a neighbouring band's halo.
+    """
+    for band in segs:
+        pstr = " ".join(f"{x},{y}" for x, y in band)
+        parts.append(
+            f'<polyline points="{pstr}" fill="none" stroke="#aacef4" stroke-width="{halo_width}" '
+            f'stroke-linejoin="round" stroke-linecap="round" opacity="0.5"/>'
+        )
+    for band in segs:
+        pstr = " ".join(f"{x},{y}" for x, y in band)
+        parts.append(
+            f'<polyline points="{pstr}" fill="none" stroke="#1a5fc4" stroke-width="0.5" '
+            f'stroke-linejoin="round" stroke-linecap="round" opacity="1"/>'
+        )
 
 
 def _generate_map_svg(data: RomoSnapshot, robot_image_uri: str | None = None) -> str:
@@ -291,7 +346,7 @@ def _generate_map_svg(data: RomoSnapshot, robot_image_uri: str | None = None) ->
                 _emit_run(start, gy, prev - start + 1, color, opacity)
 
         # _draw_grid(decode_grid_cells(data.grid_map_data, categories=(0,)), "#5a6473", "0.95")
-        _draw_grid(decode_grid_cells(data.grid_map_data), "#78a0d2", "0.5")
+        _draw_grid(decode_grid_cells(data.grid_map_data), "#78a0d2", "0.4")
 
         if clip_polys:
             parts.append('</g>')
@@ -327,29 +382,14 @@ def _generate_map_svg(data: RomoSnapshot, robot_image_uri: str | None = None) ->
                 f'stroke="#dc3c32" stroke-width="2" stroke-linecap="round"/>'
             )
 
-    # Cleaning trace
-    segs: list[list[tuple[float, float]]] = []
-    band: list[tuple[float, float]] = []
-    prev_pt: tuple[float, float] | None = None
-    for x, y in trajectory:
-        if prev_pt is not None and ((x - prev_pt[0]) ** 2 + (y - prev_pt[1]) ** 2) ** 0.5 <= 0.6:
-            band.append(to_svg(x, y))
-        else:
-            if len(band) > 1:
-                segs.append(band)
-            band = [to_svg(x, y)]
-        prev_pt = (x, y)
-    if len(band) > 1:
-        segs.append(band)
-    elif len(band) == 1 and not segs:
-        sx, sy = band[0]
-        parts.append(f'<circle cx="{sx}" cy="{sy}" r="1.5" fill="#2d78e1" opacity="0.9"/>')
-    for band in segs:
-        pstr = " ".join(f"{x},{y}" for x, y in band)
-        parts.append(
-            f'<polyline points="{pstr}" fill="none" stroke="#2d78e1" stroke-width="0.5" '
-            f'stroke-linejoin="round" stroke-linecap="round" opacity="0.9"/>'
-        )
+    # Cleaning trace: light-blue swept-area halo (robot width) + dark centre-line.
+    halo_w = round(max(_CLEAN_SWATH_WIDTH_M * scale, 2.0), 1)
+    segs = _band_trajectory(trajectory, to_svg)
+    if not segs and trajectory:
+        sx, sy = to_svg(*trajectory[-1])
+        parts.append(f'<circle cx="{sx}" cy="{sy}" r="{round(halo_w / 2, 1)}" fill="#aacef4" opacity="0.5"/>')
+        parts.append(f'<circle cx="{sx}" cy="{sy}" r="1.3" fill="#1a5fc4"/>')
+    _emit_trace(parts, segs, halo_w)
 
     # Dock marker
     if dock_x is not None and dock_y is not None:
@@ -568,7 +608,7 @@ def _generate_report_svg(data: RomoSnapshot, robot_image_uri: str | None = None)
                 _emit_run(start, gy, prev - start + 1, color, opacity)
 
         # _draw_grid(decode_grid_cells(grid, categories=(0,)), "#5a6473", "0.95")
-        _draw_grid(decode_grid_cells(grid), "#78a0d2", "0.5")
+        _draw_grid(decode_grid_cells(grid), "#78a0d2", "0.4")
 
         if clip_polys:
             parts.append('</g>')
@@ -624,12 +664,12 @@ def _generate_report_svg(data: RomoSnapshot, robot_image_uri: str | None = None)
         prev_pt = (x, y) if is_clean else None
     if len(band) > 1:
         segs.append(band)
-    for band in segs:
-        pstr = " ".join(f"{x},{y}" for x, y in band)
-        parts.append(
-            f'<polyline points="{pstr}" fill="none" stroke="#2d78e1" stroke-width="0.5" '
-            f'stroke-linejoin="round" stroke-linecap="round" opacity="0.9"/>'
-        )
+    # Fall back to the accumulated live trace (persisted/restored across reloads)
+    # when the report blob has no usable cleaning pass, so the last cleaning's
+    # trace still shows at end-of-session and after a Home Assistant reload.
+    if not segs and data.trajectory:
+        segs = _band_trajectory(data.trajectory, to_svg)
+    _emit_trace(parts, segs, round(max(_CLEAN_SWATH_WIDTH_M * scale, 2.0), 1))
 
     # Obstacles (orange).
     for o in (report_map.get("obstacle_layer") or {}).get("data", []):

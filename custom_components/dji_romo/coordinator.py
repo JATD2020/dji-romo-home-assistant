@@ -217,9 +217,24 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         # fast cleaning poll doesn't refetch them every cycle.
         self._static_cache: dict[str, Any] | None = None
         self._static_fetched_at: datetime | None = None
+        # Whether we've fetched the map overlays (carpets/no-go/virtual walls) at
+        # least once this (re)start. A restored floor plan would otherwise skip the
+        # REST map fetch, leaving these layers empty until the 6h refresh.
+        self._map_overlays_seeded: bool = False
+        # Identity + revision of the DJI map our cached/persisted overlays belong to.
+        # map_index is stable per physical map and changes on a map reset (=> drop all
+        # cached map state); map_version bumps on every edit (=> refetch the overlays
+        # so deletions/moves propagate). Both come from maps/list and the map blob.
+        self._map_index: int | None = None
+        self._map_version: int | None = None
         # UUID of the completed job whose report map is cached in the snapshot, so we
         # only refetch the (large) room_map when a newer finished job appears.
         self._last_clean_map_uuid: str | None = None
+        # mission_bid (== cleaning job uuid) we have already wiped the live trace for,
+        # so each *cleaning* session resets the trace/obstacles exactly once. Persisted
+        # so a reload mid-session (e.g. during dust-box drying) doesn't re-wipe the
+        # restored trace. Drying never matches a cleaning bid, so it can't reset.
+        self._trace_session_bid: str | None = None
         self._mqtt_credentials: DjiMqttCredentials | None = None
         # No connection-lost callback: paho auto-reconnects transient broker
         # drops seamlessly with the same client (and re-subscribes via on_connect).
@@ -240,6 +255,15 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         self._activity_hold_until: datetime | None = None
         self._paths_unsub: CALLBACK_TYPE | None = None
         self._paths_next_index: int = 0
+        # False until the first /paths poll of this (re)start has rebuilt the trace
+        # from the cloud (index 0). Ensures a restart mid-clean shows the full
+        # full-resolution cloud trace, not the downsampled persisted cache.
+        self._paths_backfilled: bool = False
+        # Last time the trajectory was actually written to disk. async_delay_save
+        # debounces, so during a live clean (continuous ~0.5-2 s saves) its timer is
+        # reset on every call and never fires — without a periodic forced write the
+        # in-progress trace would never reach disk and a reload would lose it.
+        self._last_traj_write: datetime | None = None
         # Persisted trajectory so the live map survives a Home Assistant restart.
         self._store: Store[dict[str, Any]] = Store(
             hass,
@@ -255,6 +279,17 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         the very first snapshot (the map is not blank right after a restart).
         """
         self._restored = await self._store.async_load()
+        # Learn the current map's signature before seeding, so a map reset done while
+        # HA was off is detected up front: _seed_from_restore then refuses to restore
+        # the old map's trace/overlays (stale coordinates), instead of rendering them
+        # next to the new map until a later refresh clears them.
+        try:
+            meta = await self.api.async_get_current_map_meta()
+        except Exception:  # noqa: BLE001
+            meta = None
+        if meta and meta.get("map_index") is not None:
+            self._map_index = meta.get("map_index")
+            self._map_version = meta.get("map_version")
         self._availability_unsub = async_track_time_interval(
             self.hass,
             self._async_check_availability,
@@ -293,9 +328,24 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         await super().async_shutdown()
 
     def _seed_from_restore(self, snapshot: RomoSnapshot) -> None:
-        """Seed the first snapshot from the persisted trajectory/positions."""
+        """Seed the first snapshot from the persisted trajectory/positions.
+
+        Only trust the persisted map state when it belongs to the current map: if
+        the current map signature is known (from async_setup) and the stored
+        ``map_index`` differs — a map reset, or an old store with no signature — the
+        cached trace/positions/overlays are in a stale coordinate frame, so skip them
+        and let the REST seed rebuild for the new map.
+        """
         if not self._restored:
             return
+        restored_index = self._restored.get("map_index")
+        if self._map_index is not None and restored_index != self._map_index:
+            return
+        if self._map_index is None:
+            # Couldn't verify the current map (offline at setup): trust the cache, but
+            # adopt its signature so a later refresh can still detect a reset.
+            self._map_index = restored_index
+            self._map_version = self._restored.get("map_version")
         trajectory = self._restored.get("trajectory")
         if isinstance(trajectory, list):
             snapshot.trajectory = [
@@ -322,6 +372,33 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         floor_plan_polys = self._restored.get("floor_plan_polys")
         if isinstance(floor_plan_polys, list) and floor_plan_polys:
             snapshot.floor_plan_polys = floor_plan_polys
+        # Map overlays (carpets/no-go/virtual walls) aren't refetched when the floor
+        # plan is already present, so restore them too — otherwise the live map shows
+        # no carpets during a clean right after a reload.
+        for attr, key in (
+            ("carpet_polys", "carpet_polys"),
+            ("restricted_polys", "restricted_polys"),
+            ("virtual_walls", "virtual_walls"),
+        ):
+            value = self._restored.get(key)
+            if isinstance(value, list) and value:
+                setattr(snapshot, attr, value)
+        obstacles = self._restored.get("obstacles")
+        if isinstance(obstacles, list):
+            snapshot.obstacles = [
+                (float(o[0]), float(o[1]))
+                for o in obstacles
+                if isinstance(o, (list, tuple)) and len(o) >= 2
+            ]
+        # Restore the session marker so a reload during drying doesn't re-wipe the
+        # restored trace by treating the finished clean as a brand-new session.
+        trace_session_bid = self._restored.get("trace_session_bid")
+        if isinstance(trace_session_bid, str):
+            self._trace_session_bid = trace_session_bid
+        # Note: the /paths cursor is deliberately NOT restored. The first poll of each
+        # (re)start rebuilds the whole trace from the cloud at index 0 (full
+        # resolution), so resuming a cached cursor would only risk showing the
+        # downsampled cache for the start of the trace.
 
     def _start_paths_poll(self) -> None:
         """Start the 2-second /paths polling loop."""
@@ -339,7 +416,15 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             self._paths_unsub = None
 
     async def _async_poll_paths(self, _now: datetime) -> None:
-        """Fetch incremental /paths points and append them to the live trace."""
+        """Fetch /paths points and append them to the live trace.
+
+        Drains every available page in one tick (``num_remained_points``) rather than
+        one page per 2 s call. The first poll of each (re)start rebuilds the whole
+        current-clean trace from the cloud at index 0 — full resolution, ignoring the
+        downsampled persisted cache — so a restart mid-clean shows the entire trace
+        from the start whether or not HA was running while it was cleaned. In steady
+        state there's a single forward page (remained == 0), so the cadence is normal.
+        """
         if not self.data:
             return
         bid = self.data.mission_bid
@@ -347,32 +432,47 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             self._stop_paths_poll()
             return
 
-        result = await self.api.async_get_live_paths(bid, self._paths_next_index)
-        if result is None:
-            return
-
-        data = (result.get("data") or {})
-        raw_pts: list[list[float]] = data.get("history_path") or []
-        if not raw_pts:
-            return
+        # First poll since (re)start: re-read the whole trace from the cloud (index 0)
+        # and replace the restored cache, instead of resuming the cached cursor.
+        rebuild = not self._paths_backfilled
+        if rebuild:
+            self._paths_next_index = 0
 
         # Keep only drawn pass types; x/y are cols 0/1, type is col 4.
         DRAWN_TYPES = {48, 80, 112}
-        new_pts = [
-            (float(pt[0]), float(pt[1]))
-            for pt in raw_pts
-            if len(pt) >= 5 and int(pt[4]) in DRAWN_TYPES
-        ]
-        new_end: int = data.get("end_index", self._paths_next_index)
-        if new_end > self._paths_next_index:
-            self._paths_next_index = new_end
+        new_pts: list[tuple[float, float]] = []
+        for _ in range(500):  # safety cap on pages per tick
+            result = await self.api.async_get_live_paths(bid, self._paths_next_index)
+            if result is None:
+                break
+            data = result.get("data") or {}
+            for pt in data.get("history_path") or []:
+                if len(pt) >= 5 and int(pt[4]) in DRAWN_TYPES:
+                    new_pts.append((float(pt[0]), float(pt[1])))
+            new_end: int = data.get("end_index", self._paths_next_index)
+            advanced = new_end > self._paths_next_index
+            if advanced:
+                self._paths_next_index = new_end
+            remained = data.get("num_remained_points") or 0
+            # Stop when the cloud has no more points, or the cursor didn't advance
+            # (guards against an endless loop if the server keeps reporting remainder).
+            if remained <= 0 or not advanced:
+                break
 
         if not new_pts:
-            return
+            return  # nothing fetched; keep the cache and retry next tick (rebuild stands)
 
-        # Merge into existing trajectory (cap at TRAJECTORY_MAX_POINTS as a safety net).
-        prev = self.data.trajectory
+        # On the rebuild poll, replace the (downsampled) cache with the full cloud
+        # trace; afterwards, append forward increments. Cap as a memory safety net.
+        self._paths_backfilled = True
+        prev: list[tuple[float, float]] = [] if rebuild else self.data.trajectory
         merged = list(prev[-(TRAJECTORY_MAX_POINTS - len(new_pts)):]) + new_pts
+        _LOGGER.debug(
+            "DJI Romo /paths drain: +%d drawn pts (cursor now %d) -> trace %d pts",
+            len(new_pts),
+            self._paths_next_index,
+            len(merged),
+        )
         snapshot = replace(self.data, trajectory=merged)
         self.async_set_updated_data(snapshot)
         self._schedule_trajectory_save(snapshot)
@@ -405,9 +505,49 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
                 "dock_y": snapshot.dock_y,
                 "grid_map_data": snapshot.grid_map_data,
                 "floor_plan_polys": snapshot.floor_plan_polys,
+                "carpet_polys": snapshot.carpet_polys,
+                "restricted_polys": snapshot.restricted_polys,
+                "virtual_walls": snapshot.virtual_walls,
+                "obstacles": [list(o) for o in snapshot.obstacles],
+                # Remember which session we already reset for, so a reload mid-drying
+                # doesn't treat the just-finished clean as new and wipe the restored map.
+                "trace_session_bid": self._trace_session_bid,
+                # Map this cache belongs to, so a reset (new map_index) discards it.
+                "map_index": self._map_index,
+                "map_version": self._map_version,
             }
 
-        self._store.async_delay_save(_payload, TRAJECTORY_SAVE_DELAY)
+        now = datetime.now(UTC)
+        if self._last_traj_write is None or (
+            now - self._last_traj_write
+        ) >= timedelta(seconds=TRAJECTORY_SAVE_DELAY):
+            # Force an immediate write at most once per TRAJECTORY_SAVE_DELAY: the
+            # debounced save below never fires during a live clean (its timer is reset
+            # on every call), so without this the in-progress trace never reaches disk.
+            self._last_traj_write = now
+            self.hass.async_create_task(self._store.async_save(_payload()))
+        else:
+            # Tail save: fires TRAJECTORY_SAVE_DELAY after the live stream goes quiet,
+            # capturing the final points without a downsample on every call.
+            self._store.async_delay_save(_payload, TRAJECTORY_SAVE_DELAY)
+
+    def _reset_trace_for_session(self, snapshot: RomoSnapshot, bid: str | None) -> bool:
+        """Wipe the live trace + obstacles for a new *cleaning* session, once per bid.
+
+        Callers gate this so it only runs for an actual clean (MQTT: activity is
+        "cleaning"; REST: an active cleaning job) — never for dust-box drying, which
+        reuses the dock/charger and would otherwise be mistaken for a new session and
+        wipe the finished clean's trace. The ``_trace_session_bid`` marker (persisted)
+        makes it idempotent across the MQTT/REST paths and across a reload.
+        """
+        bid = str(bid) if bid else None
+        if not bid or bid == "0" or bid == self._trace_session_bid:
+            return False
+        snapshot.trajectory = []
+        snapshot.obstacles = []
+        self._paths_next_index = 0
+        self._trace_session_bid = bid
+        return True
 
     async def async_clear_trajectory(self) -> None:
         """Clear the accumulated sweep trace and forget the persisted copy."""
@@ -538,12 +678,11 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         if last_job:
             snapshot.last_job = last_job
         # Track active job separately so _current_cleaning_room can read plan_content.
-        # Reset the trace whenever a new job UUID appears (new cleaning session); the
-        # MQTT mission_bid change also resets it live, this covers the REST path.
-        prev_active_uuid = snapshot.active_job.get("uuid") if snapshot.active_job else None
+        # Reset the trace once per new *cleaning* session (drying jobs aren't in this
+        # cleans list, so this never fires for drying); the MQTT path also resets it
+        # live via the shared, idempotent helper.
         if active_job is not None:
-            if active_job.get("uuid") != prev_active_uuid:
-                snapshot.trajectory = []
+            self._reset_trace_for_session(snapshot, active_job.get("uuid"))
             snapshot.active_job = active_job
         else:
             snapshot.active_job = {}
@@ -553,31 +692,78 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             snapshot.rooms = rooms
 
 
-        # Fetch floor plan if we don't have it yet (or once every ~12 refreshes).
-        should_fetch_floor_plan = not snapshot.floor_plan_polys or (
-            snapshot.cloud_last_updated is not None
-            and (datetime.now(UTC) - snapshot.cloud_last_updated) > timedelta(hours=6)
+        # (Re)fetch the full map and re-seed the overlays when: we don't have it yet,
+        # not seeded this (re)start, the map was edited (map_version bumped), or every
+        # ~6h. The cheap maps/list signature is only read while not cleaning — during a
+        # clean live_map_update keeps overlays current and zones can't be edited.
+        map_changed = False
+        if snapshot.activity != "cleaning":
+            try:
+                meta = await self.api.async_get_current_map_meta()
+            except Exception:  # noqa: BLE001
+                meta = None
+            if meta:
+                # A new map_index (reset) or a bumped map_version (edit, e.g. a
+                # deleted zone) both mean the cached overlays are stale.
+                new_index, new_version = meta.get("map_index"), meta.get("map_version")
+                map_changed = (
+                    self._map_index is not None
+                    and new_index is not None
+                    and new_index != self._map_index
+                ) or (
+                    self._map_version is not None
+                    and new_version is not None
+                    and new_version != self._map_version
+                )
+        should_fetch_floor_plan = (
+            not snapshot.floor_plan_polys
+            or not self._map_overlays_seeded
+            or map_changed
+            or (
+                snapshot.cloud_last_updated is not None
+                and (datetime.now(UTC) - snapshot.cloud_last_updated) > timedelta(hours=6)
+            )
         )
         if should_fetch_floor_plan:
             try:
                 map_data = await self.api.async_get_map_data()
                 if map_data:
-                    poly_info = map_data.get("seg_map", {}).get("poly_info")
-                    if poly_info:
-                        snapshot.floor_plan_polys = poly_info
+                    # A new map_index means the map was reset: the cached trace /
+                    # obstacles / positions are in the old coordinate frame, so drop
+                    # them (and the persisted copy) and reseed for the new map.
+                    new_index = map_data.get("map_index")
+                    if (
+                        self._map_index is not None
+                        and new_index is not None
+                        and new_index != self._map_index
+                    ):
+                        snapshot.trajectory = []
+                        snapshot.obstacles = []
+                        self._trace_session_bid = None
+                        self._paths_next_index = 0
+                        await self._store.async_remove()
+                    if new_index is not None:
+                        self._map_index = new_index
+                    if map_data.get("map_version") is not None:
+                        self._map_version = map_data.get("map_version")
+
+                    # Apply every overlay authoritatively (default empty) so deletions
+                    # in the app propagate — an absent/empty layer must clear the cache,
+                    # not be ignored.
+                    snapshot.floor_plan_polys = (
+                        (map_data.get("seg_map") or {}).get("poly_info") or []
+                    )
                     snapshot.grid_map_data = map_data.get("grid_map")
-                    
-                    carpet = map_data.get("carpet_layer", {})
-                    if carpet and isinstance(carpet.get("data"), list):
-                        snapshot.carpet_polys = carpet["data"]
-                        
-                    restricted = map_data.get("restricted_layer", {})
-                    if restricted and isinstance(restricted.get("data"), list):
-                        snapshot.restricted_polys = restricted["data"]
-                        
-                    vw = map_data.get("virtual_wall", {})
-                    if vw and isinstance(vw.get("data"), list):
-                        snapshot.virtual_walls = vw["data"]
+                    snapshot.carpet_polys = (
+                        (map_data.get("carpet_layer") or {}).get("data") or []
+                    )
+                    snapshot.restricted_polys = (
+                        (map_data.get("restricted_layer") or {}).get("data") or []
+                    )
+                    snapshot.virtual_walls = (
+                        (map_data.get("virtual_wall") or {}).get("data") or []
+                    )
+                    self._map_overlays_seeded = True
             except Exception:  # noqa: BLE001
                 pass  # Non-fatal: map overlay continues working without floor plan
 
@@ -1112,15 +1298,6 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             _apply_positions(snapshot, flattened)
             _apply_dock_flags(snapshot, flattened)
 
-            # A new mission_bid means a new cleaning session: clear the previous
-            # trace so the map shows only the current run (matching the DJI app).
-            new_bid = _pick_first(flattened, ("mission_bid",))
-            new_bid = str(new_bid) if new_bid else None
-            if new_bid and new_bid != "0" and new_bid != previous.mission_bid:
-                snapshot.trajectory = []
-                self._paths_next_index = 0
-                self._stop_paths_poll()
-
             battery_level = _coerce_int(
                 _pick_first(
                     flattened,
@@ -1251,6 +1428,14 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
                 source="other",
             )
 
+        # Reset the live trace/obstacles only when an actual clean is running with a
+        # new mission. Gating on the computed activity (drying maps to "docked", not
+        # "cleaning") means dust-box drying can never be mistaken for a new session and
+        # wipe the finished clean's trace. Resuming from pause keeps the same bid, so
+        # the idempotent helper won't re-clear.
+        if snapshot.activity == "cleaning":
+            self._reset_trace_for_session(snapshot, snapshot.mission_bid)
+
         if snapshot.activity == "cleaning" and snapshot.mission_bid and self._paths_unsub is None:
             self._start_paths_poll()
         elif snapshot.activity in {"docked", "idle", "error"} and self._paths_unsub is not None:
@@ -1332,6 +1517,17 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
 
         map_data = payload.get("data", {}).get("map_data", {})
 
+        # Keep the cached map signature current from the live stream so that, after a
+        # clean, the idle refresh doesn't see a spurious version change (the SLAM map
+        # bumps map_version live). Resets don't happen mid-clean, so map_index is just
+        # kept in sync here, not used to invalidate.
+        mi = map_data.get("map_index")
+        if mi is not None:
+            self._map_index = mi
+        mv = map_data.get("map_version")
+        if mv is not None:
+            self._map_version = mv
+
         seg_map = map_data.get("seg_map", {})
         poly_info = seg_map.get("poly_info")
         if isinstance(poly_info, list) and poly_info:
@@ -1352,6 +1548,15 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
                         pts.append((float(x), float(y)))
             if pts:
                 snapshot.obstacles = pts
+
+        # Carpets change live during a clean (the robot detects/moves them and the
+        # app reflects it), so keep them current from the live map. Only overwrite
+        # when the message actually carries the layer, so a frame without it doesn't
+        # wipe the carpets. (No-go zones / virtual walls can't change mid-clean, so
+        # they're only seeded over REST, not pulled here.)
+        carpet = map_data.get("carpet_layer")
+        if isinstance(carpet, dict) and isinstance(carpet.get("data"), list):
+            snapshot.carpet_polys = carpet["data"]
 
         # Occupancy grid (walls + scanned objects/furniture). DJI pushes the full
         # grid here at ~2 Hz, in the same format decode_grid_cells/image.py already

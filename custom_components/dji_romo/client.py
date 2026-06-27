@@ -174,6 +174,30 @@ class DjiRomoApiClient:
         """
         return await self._async_fetch_current_map()
 
+    async def async_get_current_map_meta(self) -> dict[str, Any] | None:
+        """Return the current map's identity/revision without downloading the blob.
+
+        Reads only the lightweight ``maps/list`` JSON and returns
+        ``{"map_index": ..., "map_version": ...}`` for the current map.
+        ``map_index`` is stable per physical map (changes on a map reset);
+        ``map_version`` bumps on every edit (e.g. deleting a no-go zone). Used to
+        decide when the cached overlays are stale and to detect a map reset.
+        """
+        try:
+            maps_payload = await self._device_request("GET", "maps/list")
+        except DjiRomoApiError:
+            return None
+        map_list: list[dict[str, Any]] = maps_payload.get("data", {}).get("map_list", [])
+        current_map = next((m for m in map_list if m.get("is_current")), None)
+        if not current_map:
+            current_map = map_list[0] if map_list else None
+        if not current_map:
+            return None
+        return {
+            "map_index": current_map.get("map_index"),
+            "map_version": current_map.get("map_version"),
+        }
+
     async def async_get_job_map(self, job_uuid: str) -> dict[str, Any] | None:
         """Fetch and decrypt a *completed job's* map snapshot.
 
