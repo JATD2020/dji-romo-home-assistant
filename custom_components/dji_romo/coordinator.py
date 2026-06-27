@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from contextlib import suppress
-from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 import logging
@@ -161,6 +161,17 @@ class RomoSnapshot:
     total_cleanings: int | None = None
     # Floor plan polygons from seg_map.poly_info (each has vertices, poly_label, etc.)
     floor_plan_polys: list[dict[str, Any]] = field(default_factory=list)
+    grid_map_data: dict[str, Any] | None = None
+    # The last *completed* cleaning's full report map (rooms + grid + obstacles +
+    # carpets + restricted zones + the dense ``history_path`` sweep trace +
+    # robot_pos/station_pos), fetched from the per-job room_map snapshot. Rendered
+    # by the "Last Cleaning" image. Refetched only when the newest finished job
+    # changes (it is a ~650 KB blob).
+    last_clean_map: dict[str, Any] | None = None
+    last_clean_map_uuid: str | None = None
+    carpet_polys: list[dict[str, Any]] = field(default_factory=list)
+    restricted_polys: list[dict[str, Any]] = field(default_factory=list)
+    virtual_walls: list[dict[str, Any]] = field(default_factory=list)
     # Point obstacles from obstacle_layer in live_map_update (furniture legs, toys, etc.)
     obstacles: list[tuple[float, float]] = field(default_factory=list)
     # Dock drying state, from the MQTT drying_progress event (dust box / mop drying).
@@ -206,6 +217,9 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         # fast cleaning poll doesn't refetch them every cycle.
         self._static_cache: dict[str, Any] | None = None
         self._static_fetched_at: datetime | None = None
+        # UUID of the completed job whose report map is cached in the snapshot, so we
+        # only refetch the (large) room_map when a newer finished job appears.
+        self._last_clean_map_uuid: str | None = None
         self._mqtt_credentials: DjiMqttCredentials | None = None
         # No connection-lost callback: paho auto-reconnects transient broker
         # drops seamlessly with the same client (and re-subscribes via on_connect).
@@ -215,15 +229,17 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         self._mqtt_recovering = False
         # Consecutive REST refresh failures; entities go unavailable past the limit.
         self._cloud_refresh_failures = 0
+        # Serializes settings writes so two switches sharing one nested object
+        # (e.g. add_cleaner_auto) can't clobber each other: the param is built
+        # under this lock, after the previous write's optimistic patch landed.
+        self._settings_write_lock = asyncio.Lock()
         self._availability_unsub: CALLBACK_TYPE | None = None
         self._pending_activity: str | None = None
         self._pending_activity_count = 0
         self._held_activity: str | None = None
         self._activity_hold_until: datetime | None = None
-        # True only during the actual floor-sweeping phase (cur_submission
-        # "cover_tree"), from room_clean_progress. Gates trajectory accumulation so
-        # the trace covers only where the robot really cleans, like the DJI app.
-        self._sweeping = False
+        self._paths_unsub: CALLBACK_TYPE | None = None
+        self._paths_next_index: int = 0
         # Persisted trajectory so the live map survives a Home Assistant restart.
         self._store: Store[dict[str, Any]] = Store(
             hass,
@@ -254,7 +270,7 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         )
 
         if self.data is not None:
-            snapshot = deepcopy(self.data)
+            snapshot = replace(self.data)
         else:
             snapshot = RomoSnapshot()
             self._seed_from_restore(snapshot)
@@ -298,30 +314,106 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             if isinstance(value, (int, float)):
                 setattr(snapshot, attr, float(value))
 
+        # Restore the last live grid + floor plan so the map isn't blank after a
+        # restart (until the REST seed / next live_map_update refreshes them).
+        grid_map_data = self._restored.get("grid_map_data")
+        if isinstance(grid_map_data, dict) and grid_map_data.get("map_data"):
+            snapshot.grid_map_data = grid_map_data
+        floor_plan_polys = self._restored.get("floor_plan_polys")
+        if isinstance(floor_plan_polys, list) and floor_plan_polys:
+            snapshot.floor_plan_polys = floor_plan_polys
+
+    def _start_paths_poll(self) -> None:
+        """Start the 2-second /paths polling loop."""
+        self._stop_paths_poll()
+        self._paths_unsub = async_track_time_interval(
+            self.hass,
+            self._async_poll_paths,
+            timedelta(seconds=2),
+        )
+
+    def _stop_paths_poll(self) -> None:
+        """Cancel the /paths polling loop if running."""
+        if self._paths_unsub is not None:
+            self._paths_unsub()
+            self._paths_unsub = None
+
+    async def _async_poll_paths(self, _now: datetime) -> None:
+        """Fetch incremental /paths points and append them to the live trace."""
+        if not self.data:
+            return
+        bid = self.data.mission_bid
+        if not bid or self.data.activity != "cleaning":
+            self._stop_paths_poll()
+            return
+
+        result = await self.api.async_get_live_paths(bid, self._paths_next_index)
+        if result is None:
+            return
+
+        data = (result.get("data") or {})
+        raw_pts: list[list[float]] = data.get("history_path") or []
+        if not raw_pts:
+            return
+
+        # Keep only drawn pass types; x/y are cols 0/1, type is col 4.
+        DRAWN_TYPES = {48, 80, 112}
+        new_pts = [
+            (float(pt[0]), float(pt[1]))
+            for pt in raw_pts
+            if len(pt) >= 5 and int(pt[4]) in DRAWN_TYPES
+        ]
+        new_end: int = data.get("end_index", self._paths_next_index)
+        if new_end > self._paths_next_index:
+            self._paths_next_index = new_end
+
+        if not new_pts:
+            return
+
+        # Merge into existing trajectory (cap at TRAJECTORY_MAX_POINTS as a safety net).
+        prev = self.data.trajectory
+        merged = list(prev[-(TRAJECTORY_MAX_POINTS - len(new_pts)):]) + new_pts
+        snapshot = replace(self.data, trajectory=merged)
+        self.async_set_updated_data(snapshot)
+        self._schedule_trajectory_save(snapshot)
+
     @callback
     def _schedule_trajectory_save(self, snapshot: RomoSnapshot) -> None:
-        """Persist the trajectory/positions (debounced) so it survives restarts.
+        """Persist the live map state (debounced) so it survives restarts.
 
-        The trajectory is downsampled for storage so a long session doesn't write
+        Covers the cleaning trace + robot/dock positions and the live occupancy
+        grid + floor plan (both pushed via MQTT, ~19 KB, so a restart shows the last
+        known map instantly instead of a blank grid until the next cloud fetch). The
+        trajectory is downsampled for storage so a long session doesn't write
         thousands of points to disk on every debounced save; the live in-memory
-        trace keeps full resolution.
+        trace keeps full resolution. Debounced (TRAJECTORY_SAVE_DELAY), so even the
+        2 Hz live_map_update stream only writes ~once per 30 s.
         """
-        data = {
-            "trajectory": [
-                list(p) for p in _downsample(snapshot.trajectory, TRAJECTORY_STORAGE_POINTS)
-            ],
-            "robot_x": snapshot.robot_x,
-            "robot_y": snapshot.robot_y,
-            "robot_yaw": snapshot.robot_yaw,
-            "dock_x": snapshot.dock_x,
-            "dock_y": snapshot.dock_y,
-        }
-        self._store.async_delay_save(lambda: data, TRAJECTORY_SAVE_DELAY)
+        # Build the payload lazily inside the callback: async_delay_save is debounced,
+        # so this only runs ~once per 30 s at write time instead of on every (2 Hz)
+        # call — the trajectory downsample isn't recomputed on each live_map_update.
+        def _payload() -> dict[str, Any]:
+            return {
+                "trajectory": [
+                    list(p)
+                    for p in _downsample(snapshot.trajectory, TRAJECTORY_STORAGE_POINTS)
+                ],
+                "robot_x": snapshot.robot_x,
+                "robot_y": snapshot.robot_y,
+                "robot_yaw": snapshot.robot_yaw,
+                "dock_x": snapshot.dock_x,
+                "dock_y": snapshot.dock_y,
+                "grid_map_data": snapshot.grid_map_data,
+                "floor_plan_polys": snapshot.floor_plan_polys,
+            }
+
+        self._store.async_delay_save(_payload, TRAJECTORY_SAVE_DELAY)
 
     async def async_clear_trajectory(self) -> None:
         """Clear the accumulated sweep trace and forget the persisted copy."""
-        snapshot = deepcopy(self.data) if self.data else RomoSnapshot()
+        snapshot = replace(self.data) if self.data else RomoSnapshot()
         snapshot.trajectory = []
+        self._paths_next_index = 0
         snapshot.last_updated = datetime.now(UTC)
         await self._store.async_remove()
         self._restored = None
@@ -468,11 +560,50 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         )
         if should_fetch_floor_plan:
             try:
-                polys = await self.api.async_get_floor_plan()
-                if polys:
-                    snapshot.floor_plan_polys = polys
+                map_data = await self.api.async_get_map_data()
+                if map_data:
+                    poly_info = map_data.get("seg_map", {}).get("poly_info")
+                    if poly_info:
+                        snapshot.floor_plan_polys = poly_info
+                    snapshot.grid_map_data = map_data.get("grid_map")
+                    
+                    carpet = map_data.get("carpet_layer", {})
+                    if carpet and isinstance(carpet.get("data"), list):
+                        snapshot.carpet_polys = carpet["data"]
+                        
+                    restricted = map_data.get("restricted_layer", {})
+                    if restricted and isinstance(restricted.get("data"), list):
+                        snapshot.restricted_polys = restricted["data"]
+                        
+                    vw = map_data.get("virtual_wall", {})
+                    if vw and isinstance(vw.get("data"), list):
+                        snapshot.virtual_walls = vw["data"]
             except Exception:  # noqa: BLE001
                 pass  # Non-fatal: map overlay continues working without floor plan
+
+        # Fetch the last *completed* cleaning's report map (rooms + grid + layers +
+        # the history_path sweep trace) for the "Last Cleaning" image — only when the
+        # newest finished job changes, since the room_map blob is ~650 KB.
+        last_completed = next(
+            (
+                j
+                for j in jobs
+                if str(j.get("status", "")).lower() in TERMINAL_JOB_STATUSES
+                and j.get("uuid")
+            ),
+            None,
+        )
+        completed_uuid = last_completed.get("uuid") if last_completed else None
+        if completed_uuid and completed_uuid != self._last_clean_map_uuid:
+            try:
+                report_map = await self.api.async_get_job_room_map(completed_uuid)
+            except Exception:  # noqa: BLE001
+                report_map = None
+            if report_map and report_map.get("history_path"):
+                snapshot.last_clean_map = report_map
+                self._last_clean_map_uuid = completed_uuid
+        
+        snapshot.last_clean_map_uuid = self._last_clean_map_uuid
 
         self._update_device_info(properties)
 
@@ -528,7 +659,7 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
                 f"Command mapping for '{command_key}' is not configured."
             )
 
-        envelope = {"method": mapping} if isinstance(mapping, str) else deepcopy(mapping)
+        envelope = {"method": mapping} if isinstance(mapping, str) else dict(mapping)
 
         method = envelope.pop("method", command_key)
         data = envelope.pop("data", {})
@@ -677,7 +808,62 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             data={**self.entry.data, key: int(value)},
             options=cleaned_options,
         )
-        self.async_set_updated_data(deepcopy(self.data) if self.data else RomoSnapshot())
+        self.async_set_updated_data(replace(self.data) if self.data else RomoSnapshot())
+
+    async def async_set_device_setting(
+        self, build_param: Callable[[], dict[str, Any]]
+    ) -> None:
+        """Write device settings (PUT settings) and reflect them locally.
+
+        ``build_param`` constructs the ``param`` body from the current snapshot; it
+        is called *inside* the write lock (and after the previous write's optimistic
+        patch) so two switches sharing one nested object (e.g. add_cleaner_auto)
+        merge correctly instead of clobbering each other under concurrent toggles.
+
+        Settings are REST-only (never in MQTT) and cached for STATIC_REFRESH_INTERVAL,
+        so after a successful write we patch the cached + live settings optimistically
+        (the entity flips immediately) and keep the static cache in sync so the next
+        poll does not revert the value before the cloud reports it back.
+        """
+        async with self._settings_write_lock:
+            param = build_param()
+            try:
+                await self.api.async_set_settings(param)
+            except DjiRomoAuthError as err:
+                self._async_create_auth_repair_issue(str(err))
+                raise UpdateFailed(f"Failed to write DJI Romo setting: {err}") from err
+            except DjiRomoApiError as err:
+                raise UpdateFailed(f"Failed to write DJI Romo setting: {err}") from err
+
+            if self.data is None:
+                return
+            settings = {**self.data.cloud_data.get("settings", {}), **param}
+            if self._static_cache is not None:
+                self._static_cache["settings"] = settings
+            new_cloud = {**self.data.cloud_data, "settings": settings}
+            self.async_set_updated_data(replace(self.data, cloud_data=new_cloud))
+
+    async def async_set_voice_language(self, lang_code: str) -> None:
+        """Switch the robot's voice language (asynchronous voicepack download).
+
+        Unlike settings writes this is a module upgrade, so there is no optimistic
+        patch: ``device_language`` only changes once the robot installs the pack.
+        We invalidate the static cache and request a refresh so the select catches
+        up on the next poll(s) as the new language is reported.
+        """
+        try:
+            await self.api.async_set_voice_language(lang_code)
+        except DjiRomoAuthError as err:
+            self._async_create_auth_repair_issue(str(err))
+            raise UpdateFailed(
+                f"Failed to set DJI Romo voice language: {err}"
+            ) from err
+        except DjiRomoApiError as err:
+            raise UpdateFailed(
+                f"Failed to set DJI Romo voice language: {err}"
+            ) from err
+        self._static_fetched_at = None
+        await self.async_request_refresh()
 
     async def async_run_dock_action(self, action: str) -> None:
         """Run a dock action and surface auth failures."""
@@ -930,28 +1116,10 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             # trace so the map shows only the current run (matching the DJI app).
             new_bid = _pick_first(flattened, ("mission_bid",))
             new_bid = str(new_bid) if new_bid else None
-            if new_bid and new_bid != previous.mission_bid:
+            if new_bid and new_bid != "0" and new_bid != previous.mission_bid:
                 snapshot.trajectory = []
-
-            # Trace the robot's sweep path. Accumulate a point only while actually
-            # sweeping (self._sweeping, from room_clean_progress) so navigation and
-            # docking are not drawn. Persisted so it survives a HA restart. 5 cm
-            # threshold trims duplicate samples.
-            if (
-                self._sweeping
-                and snapshot.robot_x is not None
-                and snapshot.robot_y is not None
-            ):
-                pt = (snapshot.robot_x, snapshot.robot_y)
-                prev_traj = snapshot.trajectory
-                if not prev_traj or (
-                    abs(pt[0] - prev_traj[-1][0]) > 0.05
-                    or abs(pt[1] - prev_traj[-1][1]) > 0.05
-                ):
-                    snapshot.trajectory = (
-                        list(prev_traj[-(TRAJECTORY_MAX_POINTS - 1):]) + [pt]
-                    )
-                    self._schedule_trajectory_save(snapshot)
+                self._paths_next_index = 0
+                self._stop_paths_poll()
 
             battery_level = _coerce_int(
                 _pick_first(
@@ -997,7 +1165,9 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             if topic_kind == "property":
                 mission_bid = _pick_first(flattened, ("mission_bid",))
                 if mission_bid is not None:
-                    snapshot.mission_bid = str(mission_bid) or None
+                    bid_str = str(mission_bid) or None
+                    if bid_str and bid_str != "0":
+                        snapshot.mission_bid = bid_str
                 status_text = _pick_first(
                     flattened,
                     (
@@ -1022,9 +1192,6 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
                     candidate_activity,
                     source="property",
                 )
-                # Any non-cleaning state ends the sweep phase.
-                if snapshot.activity != "cleaning":
-                    self._sweeping = False
                 # Clear the live "current clean" figures once the run is over.
                 if snapshot.activity in {"docked", "idle"}:
                     snapshot.clean_progress = None
@@ -1034,10 +1201,7 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
                     snapshot.active_poly_index = None
                     snapshot.active_step = None
             elif topic_kind == "events":
-                # room_clean_progress tells us if the robot is in the sweep phase
-                # (cur_submission "cover_tree") vs navigating/docking.
                 if str(payload.get("method")) == "room_clean_progress":
-                    self._sweeping = _is_sweeping(flattened)
                     # Live progress figures for the current job.
                     percent = _coerce_int(_pick_first(flattened, ("percent",)))
                     if percent is not None:
@@ -1086,6 +1250,11 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
                 candidate_activity,
                 source="other",
             )
+
+        if snapshot.activity == "cleaning" and snapshot.mission_bid and self._paths_unsub is None:
+            self._start_paths_poll()
+        elif snapshot.activity in {"docked", "idle", "error"} and self._paths_unsub is not None:
+            self._stop_paths_poll()
 
         if not _meaningful_state_changed(previous, snapshot):
             return
@@ -1174,6 +1343,8 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             pts: list[tuple[float, float]] = []
             for item in obs_data:
                 verts = item.get("vertices") or []
+                if not verts and "position" in item:
+                    verts = [item["position"]]
                 for v in verts:
                     x = v.get("x")
                     y = v.get("y")
@@ -1182,13 +1353,19 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             if pts:
                 snapshot.obstacles = pts
 
-        # We intentionally do NOT use grid_map for the cleaning trace: it is the
-        # cumulative/persistent SLAM coverage (it still shows rooms from previous
-        # sessions), so it does not match the app's per-session view. The trace is
-        # built from the live sweep path instead (see _handle_mqtt_message). We only
-        # take the floor plan and obstacles from this message.
+        # Occupancy grid (walls + scanned objects/furniture). DJI pushes the full
+        # grid here at ~2 Hz, in the same format decode_grid_cells/image.py already
+        # render, so we keep it current — this is what makes the grid grow live like
+        # the app. (We still do NOT use grid_map as the cleaning *trace*: it is the
+        # cumulative SLAM coverage and doesn't match the app's per-session sweep; the
+        # trace is built from the live /paths sweep instead.)
+        grid_map = map_data.get("grid_map")
+        if isinstance(grid_map, dict) and grid_map.get("map_data"):
+            snapshot.grid_map_data = grid_map
 
         self.async_set_updated_data(snapshot)
+        # Persist the live floor plan + grid (debounced) so they survive a restart.
+        self._schedule_trajectory_save(snapshot)
 
     def _stable_activity(
         self,
@@ -1500,28 +1677,6 @@ def _infer_property_activity(
     if previous_activity in {"docked", "returning", "paused", "cleaning"}:
         return previous_activity
     return "idle"
-
-
-def _is_sweeping(flattened: dict[str, Any]) -> bool:
-    """Return True when a room_clean_progress event is in the floor-sweeping phase.
-
-    The DJI app traces only where the robot actually sweeps, not while it drives
-    between rooms or returns to dock. The progress event's sub_job_status reports
-    submission_state "running" and cur_submission "cover_tree" (with a sweep/mop
-    display key) during sweeping; other submissions (go_home, wash, dry, dust) do
-    not, so they leave sweeping False.
-    """
-    if str(_pick_first(flattened, ("status",))).lower() != "in_progress":
-        return False
-    submission_state = str(_pick_first(flattened, ("submission_state",))).lower()
-    if submission_state not in {"running", "in_progress"}:
-        return False
-    cur_submission = str(_pick_first(flattened, ("cur_submission",))).lower()
-    display_key = str(_pick_first(flattened, ("display_text_key",))).lower()
-    if any(term in cur_submission for term in ("cover", "sweep", "mop", "clean")):
-        return True
-    return any(term in display_key for term in ("sweep", "mop"))
-
 
 def _infer_event_activity(
     flattened: dict[str, Any],

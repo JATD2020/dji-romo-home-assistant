@@ -137,24 +137,6 @@
       "last_clean_end": {
         "name": "Last Clean End"
       },
-      "device_volume": {
-        "name": "Device Volume"
-      },
-      "device_language": {
-        "name": "Device Language"
-      },
-      "auto_dust_collect": {
-        "name": "Auto Dust Collect"
-      },
-      "auto_drying": {
-        "name": "Auto Drying"
-      },
-      "hot_water_mop": {
-        "name": "Hot Water Mopping"
-      },
-      "auto_add_cleaner": {
-        "name": "Auto Add Cleaner"
-      },
       "current_room": {
         "name": "Current Cleaning Room"
       },
@@ -232,26 +214,8 @@
       "dust_bag_uv": {
         "name": "Dust Bag UV Lamp"
       },
-      "battery_care": {
-        "name": "Battery Care"
-      },
-      "child_lock": {
-        "name": "Child Lock"
-      },
-      "do_not_disturb": {
-        "name": "Do Not Disturb"
-      },
-      "auto_dust_box_drying": {
-        "name": "Auto Dust Box Drying"
-      },
-      "carpet_detection": {
-        "name": "Carpet Detection"
-      },
       "pet_care": {
         "name": "Pet Care"
-      },
-      "ai_obstacle_recognition": {
-        "name": "AI Obstacle Recognition"
       },
       "auto_mop_wash": {
         "name": "Auto Mop Wash"
@@ -261,9 +225,6 @@
       },
       "mop_deodorizer": {
         "name": "Mop Deodorizer"
-      },
-      "enhanced_particle_cleaning": {
-        "name": "Enhanced Particle Cleaning"
       },
       "enhanced_stain_cleaning": {
         "name": "Enhanced Stain Cleaning"
@@ -284,11 +245,90 @@
       },
       "room_clean_speed": {
         "name": "Room Mopping Speed"
+      },
+      "drying_mode": {
+        "name": "Drying Duration"
+      },
+      "cleaning_frequency": {
+        "name": "Cleaning Frequency"
+      },
+      "liquid_response": {
+        "name": "Liquid Response"
+      },
+      "obstacle_handling": {
+        "name": "Obstacle Handling"
+      },
+      "low_clearance_mode": {
+        "name": "Low Clearance Cleaning"
+      },
+      "carpet_behavior": {
+        "name": "Carpet Behavior"
+      },
+      "voice_language": {
+        "name": "Voice Language"
+      },
+      "dust_collect_mode": {
+        "name": "Dust Collection Mode"
+      },
+      "dust_collect_days": {
+        "name": "Dust Collection Days"
       }
     },
     "number": {
       "room_clean_num": {
         "name": "Room Cleaning Passes"
+      },
+      "device_volume": {
+        "name": "Volume"
+      }
+    },
+    "switch": {
+      "child_lock": {
+        "name": "Child Lock"
+      },
+      "cliff_detection": {
+        "name": "Cliff Detection"
+      },
+      "battery_care": {
+        "name": "Battery Care"
+      },
+      "do_not_disturb": {
+        "name": "Do Not Disturb"
+      },
+      "hot_water_mop": {
+        "name": "Hot Water Mopping"
+      },
+      "auto_add_cleaner": {
+        "name": "Auto Add Cleaner"
+      },
+      "enhanced_particle_cleaning": {
+        "name": "Enhanced Particle Cleaning"
+      },
+      "auto_dust_box_drying": {
+        "name": "Auto Dust Box Drying"
+      },
+      "auto_drying": {
+        "name": "Auto Drying"
+      },
+      "kitchen_bathroom_wet_wash": {
+        "name": "Kitchen & Bathroom Wet Wash"
+      },
+      "ai_obstacle_recognition": {
+        "name": "AI Obstacle Recognition"
+      },
+      "obstacle_photo": {
+        "name": "Obstacle Photos"
+      }
+    },
+    "time": {
+      "dnd_start": {
+        "name": "Do Not Disturb Start"
+      },
+      "dnd_end": {
+        "name": "Do Not Disturb End"
+      },
+      "dust_collect_time": {
+        "name": "Dust Collection Time"
       }
     },
     "button": {

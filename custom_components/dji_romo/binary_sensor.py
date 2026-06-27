@@ -83,17 +83,7 @@ BINARY_SENSORS: tuple[DjiRomoBinarySensorDescription, ...] = (
         value_fn=lambda coordinator: bool(coordinator.data.hms_alerts)
         or coordinator.data.activity == "error",
     ),
-    DjiRomoBinarySensorDescription(
-        key="auto_dust_box_drying",
-        name="Auto Dust Box Drying",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        # The app setting that enables post-clean dust box drying + UV sterilization.
-        # This mirrors the on/off setting, NOT the live drying activity (see the
-        # "Drying Status" sensor for that), so no RUNNING device class.
-        value_fn=lambda coordinator: _truthy(
-            _setting(coordinator, "drying", "dust_box_drying")
-        ),
-    ),
+    # Auto dust box drying is now a writable switch (see switch.py).
     DjiRomoBinarySensorDescription(
         key="dust_bag_uv",
         name="Dust Bag UV Lamp",
@@ -102,51 +92,18 @@ BINARY_SENSORS: tuple[DjiRomoBinarySensorDescription, ...] = (
         # Live lamp state (osd, ~1 s): only on during the dust box drying cycle.
         value_fn=lambda coordinator: _truthy(coordinator.data.dust_bag_uv_enable),
     ),
-    DjiRomoBinarySensorDescription(
-        key="battery_care",
-        name="Battery Care",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        # Live from the device_osd stream (~1 s).
-        value_fn=lambda coordinator: _truthy(coordinator.data.battery_care_active),
-    ),
-    DjiRomoBinarySensorDescription(
-        key="child_lock",
-        name="Child Lock",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        # Plain flag: on = child lock enabled.
-        value_fn=lambda coordinator: _truthy(
-            _setting(coordinator, "is_child_lock_open")
-        ),
-    ),
-    DjiRomoBinarySensorDescription(
-        key="do_not_disturb",
-        name="Do Not Disturb",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: _truthy(
-            _setting(coordinator, "no_disturb", "is_open")
-        ),
-    ),
+    # Battery care, child lock and Do-Not-Disturb are now writable switches
+    # (see switch.py), no longer read-only sensors.
+    # Carpet behavior is now a multi-level select (see select.py); the old
+    # boolean mirror was lossy (meet_carpet_mode is an enum, not on/off).
     # --- Read-only mirrors of the app's on/off settings (controls TBD) ---
-    DjiRomoBinarySensorDescription(
-        key="carpet_detection",
-        name="Carpet Detection",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: _truthy(_setting(coordinator, "meet_carpet_mode")),
-    ),
     DjiRomoBinarySensorDescription(
         key="pet_care",
         name="Pet Care",
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda coordinator: _truthy(_setting(coordinator, "is_pet_care")),
     ),
-    DjiRomoBinarySensorDescription(
-        key="ai_obstacle_recognition",
-        name="AI Obstacle Recognition",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: _truthy(
-            _setting(coordinator, "ai_recognition", "is_open")
-        ),
-    ),
+    # AI obstacle recognition is now a writable switch (see switch.py).
     DjiRomoBinarySensorDescription(
         key="auto_mop_wash",
         name="Auto Mop Wash",
@@ -169,14 +126,7 @@ BINARY_SENSORS: tuple[DjiRomoBinarySensorDescription, ...] = (
             _setting(coordinator, "deodorizer_mop", "mode")
         ),
     ),
-    DjiRomoBinarySensorDescription(
-        key="enhanced_particle_cleaning",
-        name="Enhanced Particle Cleaning",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: _truthy(
-            _setting(coordinator, "enhance_particle_clean")
-        ),
-    ),
+    # Enhanced particle cleaning is now a writable switch (see switch.py).
     DjiRomoBinarySensorDescription(
         key="enhanced_stain_cleaning",
         name="Enhanced Stain Cleaning",

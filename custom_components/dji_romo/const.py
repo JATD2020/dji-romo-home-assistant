@@ -83,6 +83,8 @@ PLATFORMS = [
     "button",
     "select",
     "number",
+    "switch",
+    "time",
     "image",
     "event",
 ]
@@ -90,12 +92,13 @@ PLATFORMS = [
 # Persisted trajectory (so the map survives a Home Assistant restart).
 TRAJECTORY_STORAGE_VERSION = 1
 TRAJECTORY_STORAGE_KEY = f"{DOMAIN}_trajectory"
-# A full cleaning session swept at ~1 Hz can be several thousand points; keep
-# enough that an entire run fits without dropping the rooms cleaned early on.
-TRAJECTORY_MAX_POINTS = 6000
+# We keep the full real trace (every path point, like the DJI app). This cap is only a
+# memory safety net so a pathologically long session can't grow unbounded; at ~2.9 pts/s
+# it covers a ~7.5h run before the oldest points start dropping.
+TRAJECTORY_MAX_POINTS = 80000
 # Cap on points actually written to disk (the live trace keeps full resolution);
 # a long session is downsampled to this before persisting.
-TRAJECTORY_STORAGE_POINTS = 1500
+TRAJECTORY_STORAGE_POINTS = 8000
 TRAJECTORY_SAVE_DELAY = 30  # seconds; debounced disk writes
 
 # Home Assistant service to clean several named rooms in one job.

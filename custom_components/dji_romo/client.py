@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import json
 import logging
+import struct
 from typing import Any
 from uuid import uuid4
 
@@ -77,6 +79,64 @@ class DjiRomoApiClient:
             expires_at=expires_at,
         )
 
+    async def _async_get_share_key(self) -> bytes | None:
+        """Return the device map-decryption key (AES-256-GCM) as raw bytes.
+
+        The key is the ``share_encryption_key`` (32-byte hex) from ``safety/info``;
+        every encrypted map blob this account serves is decryptable with it.
+        """
+        try:
+            safety_info = await self._device_request("GET", "safety/info")
+        except DjiRomoApiError:
+            return None
+        share_key_hex: str = safety_info.get("data", {}).get("share_encryption_key", "")
+        if not share_key_hex or len(share_key_hex) != 64:
+            return None
+        try:
+            return bytes.fromhex(share_key_hex)
+        except ValueError:
+            return None
+
+    async def _async_download_and_decrypt_map(
+        self,
+        file_url: str,
+        file_header: dict[str, str],
+        share_key: bytes,
+    ) -> dict[str, Any] | None:
+        """Download an S3 map blob and AES-256-GCM decrypt it to JSON.
+
+        The blob is ``nonce(16) || ciphertext || tag``; the SSE-C ``file_header``
+        is sent as request headers so S3 returns the (still app-encrypted) bytes.
+        """
+        if not file_url:
+            return None
+        try:
+            async with self._session.get(
+                file_url,
+                headers=dict(file_header),
+                raise_for_status=True,
+            ) as resp:
+                encrypted_bytes = await resp.read()
+        except ClientError:
+            return None
+
+        try:
+            import asyncio
+
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            aesgcm = AESGCM(share_key)
+            loop = asyncio.get_running_loop()
+            plaintext = await loop.run_in_executor(
+                None,
+                aesgcm.decrypt,
+                encrypted_bytes[:16],
+                encrypted_bytes[16:],
+                None,
+            )
+            return json.loads(plaintext)
+        except Exception:
+            return None
+
     async def _async_fetch_current_map(self) -> dict[str, Any] | None:
         """Download and decrypt the current SLAM map file, returning its JSON.
 
@@ -86,13 +146,8 @@ class DjiRomoApiClient:
         refreshed server-side during a session — so a fresh client (or HA after a
         restart) can re-fetch the full current coverage without local state.
         """
-        try:
-            safety_info = await self._device_request("GET", "safety/info")
-            share_key_hex: str = safety_info.get("data", {}).get("share_encryption_key", "")
-            if not share_key_hex or len(share_key_hex) != 64:
-                return None
-            share_key = bytes.fromhex(share_key_hex)
-        except DjiRomoApiError:
+        share_key = await self._async_get_share_key()
+        if share_key is None:
             return None
 
         try:
@@ -106,46 +161,125 @@ class DjiRomoApiClient:
         except DjiRomoApiError:
             return None
 
-        file_url: str = current_map.get("file_url", "")
-        file_header: dict[str, str] = current_map.get("file_header", {})
+        return await self._async_download_and_decrypt_map(
+            current_map.get("file_url", ""),
+            current_map.get("file_header", {}),
+            share_key,
+        )
+
+    async def async_get_map_data(self) -> dict[str, Any] | None:
+        """Fetch and decrypt the full map data.
+
+        Returns the full decrypted map dictionary.
+        """
+        return await self._async_fetch_current_map()
+
+    async def async_get_job_map(self, job_uuid: str) -> dict[str, Any] | None:
+        """Fetch and decrypt a *completed job's* map snapshot.
+
+        This is the frozen "cleaning report" map for one job (endpoint
+        ``GET jobs/cleans/{uuid}/map``), decrypted with the same share key. It
+        carries the same layers as the live map — ``seg_map`` (room polygons),
+        ``obstacle_layer`` (detected objects/furniture, each with a photo
+        ``file_id``), ``carpet_layer``, ``restricted_layer``, ``virtual_wall`` and
+        the occupancy ``grid_map`` — but for the state at that job's completion.
+
+        Note: this map does *not* contain the sweep trace; the per-job trace lives
+        in the job's ``room_map`` file instead (see ``async_get_job_trace``).
+        """
+        share_key = await self._async_get_share_key()
+        if share_key is None:
+            return None
+        try:
+            payload = await self._device_request("GET", f"jobs/cleans/{job_uuid}/map")
+        except DjiRomoApiError:
+            return None
+        data = payload.get("data", {})
+        return await self._async_download_and_decrypt_map(
+            data.get("file_url", ""),
+            data.get("file_header", {}),
+            share_key,
+        )
+
+    async def async_get_job_room_map(self, job_uuid: str) -> dict[str, Any] | None:
+        """Fetch and decrypt a completed job's full ``room_map`` snapshot.
+
+        This is the "cleaning report" map the DJI app draws for a past job. Unlike
+        ``/map`` (occupancy only) it carries every layer for that job's end state —
+        ``seg_map`` (rooms), ``grid_map`` (occupancy), ``obstacle_layer``,
+        ``carpet_layer``, ``restricted_layer``, ``virtual_wall`` — **plus** the dense
+        sweep trace ``history_path`` (``[x, y, yaw, flag, type, width]`` points in
+        metres) and ``robot_pos`` / ``station_pos``. It is a larger blob (~650 KB).
+
+        The job detail only carries the ``room_map.file_id`` (no URL); it is resolved
+        via ``GET /cr/app/api/v1/storage/{file_id}/url?file_id=<id>&sn=<sn>`` (both
+        query params required — the server returns 121001 without them), which yields
+        the S3 ``file_url`` + SSE-C ``file_header``; the blob decrypts with the share
+        key.
+        """
+        share_key = await self._async_get_share_key()
+        if share_key is None:
+            return None
+
+        try:
+            job = await self._device_request("GET", f"jobs/cleans/{job_uuid}")
+        except DjiRomoApiError:
+            return None
+        room_map = job.get("data", {}).get("room_map", {})
+        file_id = room_map.get("file_id")
+        if not file_id:
+            return None
+
+        file_url = room_map.get("file_url") or ""
+        file_header: dict[str, str] = {}
+        if not file_url:
+            try:
+                resolved = await self._request(
+                    f"/cr/app/api/v1/storage/{file_id}/url",
+                    params={"file_id": file_id, "sn": self._device_sn},
+                )
+            except DjiRomoApiError:
+                return None
+            data = resolved.get("data") or {}
+            file_url = data.get("file_url", "")
+            file_header = data.get("file_header", {})
         if not file_url:
             return None
 
-        try:
-            async with self._session.get(
-                file_url,
-                headers={k: v for k, v in file_header.items()},
-                raise_for_status=True,
-            ) as resp:
-                encrypted_bytes = await resp.read()
-        except ClientError:
-            return None
+        return await self._async_download_and_decrypt_map(
+            file_url, file_header, share_key
+        )
 
-        try:
-            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-            aesgcm = AESGCM(share_key)
-            plaintext = aesgcm.decrypt(encrypted_bytes[:16], encrypted_bytes[16:], None)
-            return json.loads(plaintext)
-        except Exception:
+    async def async_get_job_trace(self, job_uuid: str) -> list[list[float]] | None:
+        """Return a completed job's robot sweep trace (``history_path`` points)."""
+        room_map_data = await self.async_get_job_room_map(job_uuid)
+        if not room_map_data:
             return None
-
-    async def async_get_floor_plan(self) -> list[dict[str, Any]] | None:
-        """Fetch and decrypt the floor plan polygon data.
-
-        Returns a list of room polygon dicts from seg_map.poly_info, or None if
-        the map is unavailable.  Each dict has keys: poly_index, poly_label,
-        user_label, poly_name_index, custom_name, vertices (list of {x, y}).
-        """
-        data = await self._async_fetch_current_map()
-        if not data:
-            return None
-        poly_info: list[dict[str, Any]] = data.get("seg_map", {}).get("poly_info") or []
-        return poly_info if poly_info else None
+        history = room_map_data.get("history_path") or {}
+        points = history.get("history_path")
+        return points if isinstance(points, list) and points else None
 
     async def async_get_homes(self) -> list[dict[str, Any]]:
         """Fetch homes and attached devices for the logged-in user."""
         payload = await self._request("/app/api/v1/homes")
         return payload.get("data", {}).get("homes", [])
+
+    async def async_get_live_paths(
+        self, bid: str, start_index: int
+    ) -> dict[str, Any] | None:
+        """Fetch incremental path points for an active cleaning job.
+
+        Returns the raw API response dict, or None on any error.
+        Endpoint: GET /cr/app/api/v1/devices/{SN}/paths?bid=...&start_index=...
+        """
+        try:
+            return await self._device_request(
+                "GET",
+                "paths",
+                params={"bid": bid, "start_index": start_index},
+            )
+        except DjiRomoApiError:
+            return None
 
     async def async_get_jobs(self, limit: int = 10) -> list[dict[str, Any]]:
         """Fetch the most recent cleaning jobs, newest first."""
@@ -194,6 +328,38 @@ class DjiRomoApiClient:
         """Fetch device settings."""
         payload = await self._device_request("GET", "settings")
         return payload.get("data", {})
+
+    async def async_set_settings(self, param: dict[str, Any]) -> None:
+        """Write one or more device settings.
+
+        The write endpoint is ``PUT .../devices/{sn}/settings`` and the body the
+        DJI Home app sends wraps the changed keys in a ``param`` object alongside
+        a ``double_check`` flag, e.g. ``{"double_check": false, "param":
+        {"is_child_lock_open": 0}}``. Sending the keys at the top level (without
+        the ``param`` wrapper) is what made every earlier guess return ``121001
+        "Request parameter error"``. ``param`` keys mirror the ``settings`` GET
+        schema, so partial updates are fine — only the keys present are changed.
+        """
+        await self._device_request(
+            "PUT",
+            "settings",
+            json={"double_check": False, "param": param},
+        )
+
+    async def async_set_voice_language(self, lang_code: str) -> None:
+        """Switch the robot's voice language by upgrading its voicepack module.
+
+        Language is NOT a settings write: the app POSTs a module upgrade and the
+        robot downloads/installs the voicepack asynchronously. The settings
+        ``device_language`` field only reflects the new language once installed.
+        Endpoint + body captured via MITM 2026-06-22
+        (``{"module_type": "voicepack_<code>"}``).
+        """
+        await self._device_request(
+            "POST",
+            "moduleFile/upgrade",
+            json={"module_type": f"voicepack_{lang_code}"},
+        )
 
     async def async_get_consumables(self) -> list[dict[str, Any]]:
         """Fetch robot consumable status."""
@@ -511,6 +677,54 @@ class DjiRomoApiClient:
         if include_json:
             headers["Content-Type"] = "application/json"
         return headers
+
+
+def decode_grid_cells(
+    grid: dict[str, Any],
+    *,
+    categories: tuple[int, ...] | None = None,
+) -> list[tuple[int, int]]:
+    """Decode an occupancy ``grid_map`` into the list of set ``(gx, gy)`` cells.
+
+    ``grid_map.map_data[].data`` is a list of base64 chunks; chunk *i* is one
+    65536-cell block of **sorted little-endian uint16 offsets**, so the true flat
+    cell index is ``i * 65536 + uint16``. Missing that block offset collapses every
+    chunk past the first onto the same rows (the original decode bug).
+
+    ``categories`` selects which grid layers to include. The default (``None``)
+    returns every **non-zero** category (the scanned occupancy detail) and skips
+    category 0, which is the SLAM wall layer; pass e.g. ``(0,)`` to get just the
+    walls. Returns integer grid coordinates ``(gx, gy)`` — the caller maps them to
+    world metres via ``map_info`` (``origin_x + gx*resolution``, ``origin_y +
+    gy*resolution``).
+    """
+    map_info = grid.get("map_info") or {}
+    try:
+        width = int(map_info.get("width") or 0)
+    except (TypeError, ValueError):
+        width = 0
+    if width <= 0:
+        return []
+
+    cells: list[tuple[int, int]] = []
+    for item in grid.get("map_data", []):
+        cat = item.get("category", 0)
+        if categories is None:
+            if cat == 0:
+                continue
+        elif cat not in categories:
+            continue
+        for block_index, chunk in enumerate(item.get("data", [])):
+            try:
+                raw = base64.b64decode(chunk)
+            except Exception:  # noqa: BLE001 - skip an unparsable chunk
+                continue
+            base = block_index * 65536
+            # Trim a stray odd byte so iter_unpack never raises.
+            for (offset,) in struct.iter_unpack("<H", raw[: len(raw) & ~1]):
+                flat = base + offset
+                cells.append((flat % width, flat // width))
+    return cells
 
 
 def _default_start_shortcut(shortcuts: list[dict[str, Any]]) -> dict[str, Any]:

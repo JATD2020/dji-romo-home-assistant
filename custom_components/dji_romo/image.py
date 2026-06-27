@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from base64 import b64encode
 from datetime import datetime
+from itertools import groupby
 from math import atan2, cos, degrees, radians, sin
 from pathlib import Path
 
@@ -12,31 +13,33 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from .client import decode_grid_cells
 from .coordinator import DjiRomoCoordinator, RomoSnapshot
 from .entity import DjiRomoCoordinatorEntity
 from .rooms import duplicate_label_ids, room_name
-
 PARALLEL_UPDATES = 0
-_ROBOT_TOP_IMAGE = Path(__file__).with_name("robot_top.png")
-_ROBOT_MARKER_SIZE = 20
-# The supplied top-view image points upward by default. Yaw is an angle from the
-# map X axis, so this offset keeps the image aligned with the displayed heading.
-_ROBOT_IMAGE_HEADING_OFFSET = 90
 
+_ROBOT_MARKER_SIZE = 15
+_ROBOT_IMAGE_HEADING_OFFSET = 90.0
+_ROBOT_TOP_IMAGE = Path(__file__).parent / "robot_top.png"
 
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up the Romo map image entity."""
+    """Set up the Romo map image entities."""
     coordinator = entry.runtime_data
     robot_image_uri = await hass.async_add_executor_job(_load_robot_image_data_uri)
     async_add_entities([DjiRomoMapImage(coordinator, robot_image_uri)])
 
 
 class DjiRomoMapImage(DjiRomoCoordinatorEntity, ImageEntity):
-    """SVG trajectory map showing robot path, robot position, and dock."""
+    """SVG trajectory map showing robot path, robot position, and dock.
+    
+    Dynamically switches between the live map (during cleaning) and the
+    historical last cleaning report (when idle/docked).
+    """
 
     _attr_content_type = "image/svg+xml"
 
@@ -65,7 +68,35 @@ class DjiRomoMapImage(DjiRomoCoordinatorEntity, ImageEntity):
         Falls back to the REST refresh time so the entity has a state (and is
         not "unavailable") before the first MQTT osd message arrives.
         """
+        from datetime import UTC, datetime, timedelta
+        
         data = self.coordinator.data
+        if not data:
+            return None
+            
+        is_active = data.activity in {"cleaning", "paused", "returning", "error"}
+        
+        # mission_bid from MQTT is instantly updated. last_job from REST lags.
+        last_job_uuid = data.last_job.get("uuid") if data.last_job else None
+        latest_known_uuid = data.mission_bid or last_job_uuid
+        
+        # When docked/idle, show the end time of the last cleaning job, but ONLY
+        # if the REST API has actually fetched this newly finished job.
+        if not is_active and data.last_job and last_job_uuid == latest_known_uuid:
+            end_time = data.last_job.get("end_time")
+            if end_time and isinstance(end_time, (int, float)) and end_time > 0:
+                dt = datetime.fromtimestamp(end_time, tz=UTC)
+                
+                # If the final report map is available, append a microsecond to bust
+                # the browser cache and load the new SVG without changing the UI display time.
+                has_latest_report = bool(
+                    data.last_clean_map_uuid and latest_known_uuid and data.last_clean_map_uuid == latest_known_uuid
+                )
+                if has_latest_report:
+                    dt += timedelta(microseconds=1)
+                
+                return dt
+
         stamps = [t for t in (data.last_updated, data.cloud_last_updated) if t]
         return max(stamps) if stamps else None
 
@@ -75,10 +106,23 @@ class DjiRomoMapImage(DjiRomoCoordinatorEntity, ImageEntity):
         height: int | None = None,
     ) -> bytes | None:
         """Return the SVG map as UTF-8 bytes."""
-        return _generate_map_svg(
-            self.coordinator.data,
-            self._robot_image_uri,
-        ).encode("utf-8")
+        data = self.coordinator.data
+        if not data:
+            return None
+            
+        is_active = data.activity in {"cleaning", "paused", "returning", "error"}
+        
+        last_job_uuid = data.last_job.get("uuid") if data.last_job else None
+        latest_known_uuid = data.mission_bid or last_job_uuid
+        
+        has_latest_report = bool(
+            data.last_clean_map_uuid and latest_known_uuid and data.last_clean_map_uuid == latest_known_uuid
+        )
+        
+        if not is_active and data.last_clean_map and has_latest_report:
+            return _generate_report_svg(data, self._robot_image_uri).encode("utf-8")
+        else:
+            return _generate_map_svg(data, self._robot_image_uri).encode("utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -101,148 +145,230 @@ def _generate_map_svg(data: RomoSnapshot, robot_image_uri: str | None = None) ->
     dock_x, dock_y = data.dock_x, data.dock_y
     polys = data.floor_plan_polys
 
-    raw_pts: list[tuple[float, float]] = list(trajectory)
+    # Collect all known points to compute the bounding box.  The floor plan frames
+    # the view; the sweep trace, robot and dock are included so nothing clips.
+    all_pts: list[tuple[float, float]] = list(trajectory)
     if robot_x is not None and robot_y is not None:
-        raw_pts.append((robot_x, robot_y))
+        all_pts.append((robot_x, robot_y))
     if dock_x is not None and dock_y is not None:
-        raw_pts.append((dock_x, dock_y))
+        all_pts.append((dock_x, dock_y))
     for poly in polys:
-        for v in poly.get("vertices", []):
-            raw_pts.append((v["x"], v["y"]))
+        for v in poly.get("border_vertices", poly.get("vertices", [])):
+            all_pts.append((v["x"], v["y"]))
 
-    if not raw_pts:
+    if not all_pts:
         return _EMPTY_SVG
 
-    raw_xs = [p[0] for p in raw_pts]
-    raw_ys = [p[1] for p in raw_pts]
-    rotate_origin = (
-        (min(raw_xs) + max(raw_xs)) / 2,
-        (min(raw_ys) + max(raw_ys)) / 2,
-    )
     map_rotation = _map_alignment_rotation(polys)
 
     def rotate_map_point(px: float, py: float) -> tuple[float, float]:
         if not map_rotation:
             return px, py
-        ox, oy = rotate_origin
         angle = radians(map_rotation)
-        dx = px - ox
-        dy = py - oy
-        return (
-            ox + dx * cos(angle) - dy * sin(angle),
-            oy + dx * sin(angle) + dy * cos(angle),
-        )
+        c, s = cos(angle), sin(angle)
+        return px * c - py * s, px * s + py * c
 
-    # Collect all known points to compute the bounding box.  The floor plan frames
-    # the view; the sweep trace, robot and dock are included so nothing clips.
-    all_pts = [rotate_map_point(x, y) for x, y in raw_pts]
-
-    xs = [p[0] for p in all_pts]
-    ys = [p[1] for p in all_pts]
-    # Roomier padding keeps the map readable in entity views and avoids clipping
-    # the rendered robot image near edges.
-    pad = 0.6
+    rotated_pts = [rotate_map_point(x, y) for x, y in all_pts]
+    xs = [p[0] for p in rotated_pts]
+    ys = [p[1] for p in rotated_pts]
+    pad = 0.3
     min_x, max_x = min(xs) - pad, max(xs) + pad
     min_y, max_y = min(ys) - pad, max(ys) + pad
     span_x = max(max_x - min_x, 0.5)
     span_y = max(max_y - min_y, 0.5)
 
-    # Map canvas: 276 × 220 px inside 300 px wide SVG.
-    canvas_w, canvas_h = 276, 220
-    cx0, cy0 = 12.0, 8.0  # top-left corner of canvas in SVG space
+    canvas_w, canvas_h = 276.0, 220.0
+    margin = 12.0
     scale = min(canvas_w / span_x, canvas_h / span_y)
-    # Centre the drawing inside the canvas.
-    draw_x = cx0 + (canvas_w - span_x * scale) / 2
-    draw_y = cy0 + (canvas_h - span_y * scale) / 2
+    svg_w = round(canvas_w + 2 * margin, 1)
+    map_block_h = round(canvas_h + 2 * margin, 1)
+    draw_x = margin + (canvas_w - span_x * scale) / 2
+    draw_y = margin + (canvas_h - span_y * scale) / 2
 
     def to_svg(px: float, py: float) -> tuple[float, float]:
         tx, ty = rotate_map_point(px, py)
-        sx = draw_x + (tx - min_x) * scale
-        sy = draw_y + (max_y - ty) * scale  # flip Y (map N = SVG up)
-        return round(sx, 1), round(sy, 1)
+        return (
+            round(draw_x + (tx - min_x) * scale, 1),
+            round(draw_y + (max_y - ty) * scale, 1),
+        )
 
-    # Dynamic height: fixed map block + legend rows.
+    # Dynamic height: map block + legend rows.
     rooms = data.rooms
     n_rows = (len(rooms) + 1) // 2 if rooms else 0
     legend_h = 5 + n_rows * 14 if rooms else 0
-    map_block_h = int(cy0 * 2) + canvas_h
-    svg_h = map_block_h + legend_h
+    svg_h = round(map_block_h + legend_h, 1)
 
     parts: list[str] = [
-        f'<svg viewBox="0 0 300 {svg_h}" xmlns="http://www.w3.org/2000/svg">',
-        f'<rect width="300" height="{svg_h}" '
-        f'fill="var(--card-background-color,#1c1c1e)" rx="6"/>',
+        f'<svg viewBox="0 0 {svg_w} {svg_h}" xmlns="http://www.w3.org/2000/svg">',
+        '<defs>'
+        '<pattern id="rc" width="5" height="5" patternUnits="userSpaceOnUse">'
+        '<rect x="0.35" y="0.35" width="1.8" height="1.8" fill="#cfd0d0"/>'
+        '<rect x="2.85" y="2.85" width="1.8" height="1.8" fill="#cfd0d0"/></pattern>'
+        '<pattern id="ng" width="7.5" height="7.5" patternUnits="userSpaceOnUse" '
+        'patternTransform="rotate(45)">'
+        '<rect width="7.5" height="7.5" fill="#e18f81"/>'
+        '<rect width="3.8" height="7.5" fill="#e34d35"/></pattern>'
+        '</defs>',
+        f'<rect width="{svg_w}" height="{svg_h}" fill="#e8eaee" rx="6"/>',
     ]
 
-    # Floor plan: filled room polygons + outlines.
+    # Floor plan: 3 passes (grey border base, white accessible area, grey outline).
     if polys:
-        room_polys = [p for p in polys if len(p.get("vertices", [])) >= 3]
-        # Number duplicate room types ("Bathroom1"/"Bathroom2") like everywhere else.
+        room_polys = [p for p in polys if len(p.get("border_vertices", p.get("vertices", []))) >= 3]
         dup_labels = duplicate_label_ids(room_polys)
+        
+        for poly in room_polys:
+            verts = poly.get("border_vertices", poly.get("vertices", []))
+            svg_verts = [to_svg(v["x"], v["y"]) for v in verts]
+            pts_str = " ".join(f"{x},{y}" for x, y in svg_verts)
+            parts.append(f'<polygon points="{pts_str}" fill="#d6d8db"/>')
+            
         for poly in room_polys:
             verts = poly.get("vertices", [])
+            if len(verts) >= 3:
+                svg_verts = [to_svg(v["x"], v["y"]) for v in verts]
+                pts_str = " ".join(f"{x},{y}" for x, y in svg_verts)
+                parts.append(f'<polygon points="{pts_str}" fill="#f3f4f5"/>')
+                
+        for poly in room_polys:
+            verts = poly.get("border_vertices", poly.get("vertices", []))
             name = room_name(poly, dup_labels)
             is_active = bool(name) and name == data.current_room
             svg_verts = [to_svg(v["x"], v["y"]) for v in verts]
             pts_str = " ".join(f"{x},{y}" for x, y in svg_verts)
-            fill = "#264666" if is_active else "#1e3a52"
             parts.append(
-                f'<polygon points="{pts_str}" fill="{fill}" '
-                f'stroke="#3a5f80" stroke-width="0.8" opacity="0.85"/>'
+                f'<polygon points="{pts_str}" fill="none" stroke="#96a0af" stroke-width="0.8"/>'
             )
-            # Room label centroid
             if name:
-                cx = round(sum(v[0] for v in svg_verts) / len(svg_verts), 1)
-                cy = round(sum(v[1] for v in svg_verts) / len(svg_verts), 1)
-                label_color = "#5bc8f5" if is_active else "#7ab5d0"
+                cx, cy = _polygon_centroid(svg_verts)
+                label_color = "#3498db" if is_active else "#282d37"
                 parts.append(
                     f'<text x="{cx}" y="{cy}" text-anchor="middle" dominant-baseline="middle" '
                     f'font-size="6.5" fill="{label_color}" font-family="sans-serif">'
                     f'{name[:12]}</text>'
                 )
 
-    # Cleaning trace: the path the robot swept this session, accumulated from its
-    # position only while actually sweeping (and persisted across restarts). Drawn
-    # as a wide translucent band (one robot width) plus a brighter centre line, so
-    # the back-and-forth rows merge into the filled look the DJI app shows.
-    if len(trajectory) > 1:
-        svg_pts = [to_svg(x, y) for x, y in trajectory]
-        pts_str = " ".join(f"{x},{y}" for x, y in svg_pts)
-        band_w = max(4.0, round(0.33 * scale, 1))  # ~33 cm cleaning width
-        parts.append(
-            f'<polyline points="{pts_str}" fill="none" stroke="#3a9fd4" '
-            f'stroke-width="{band_w}" stroke-linecap="round" stroke-linejoin="round" '
-            f'opacity="0.45"/>'
-        )
-        parts.append(
-            f'<polyline points="{pts_str}" fill="none" stroke="#5b8def" '
-            f'stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" '
-            f'opacity="0.8"/>'
-        )
-    elif trajectory:
-        sx, sy = to_svg(*trajectory[0])
-        parts.append(f'<circle cx="{sx}" cy="{sy}" r="3" fill="#5b8def" opacity="0.85"/>')
+    # Occupancy grid (the scanned floor detail).
+    if data.grid_map_data:
+        clip_polys = []
+        for p in polys:
+            vs = p.get("border_vertices") or []
+            if vs:
+                pts = " ".join(f"{to_svg(v['x'], v['y'])[0]},{to_svg(v['x'], v['y'])[1]}" for v in vs)
+                clip_polys.append(f'<polygon points="{pts}"/>')
+                
+        if clip_polys:
+            parts.append('<defs><clipPath id="live_floor_clip">')
+            parts.extend(clip_polys)
+            parts.append('</clipPath></defs>')
+            parts.append('<g clip-path="url(#live_floor_clip)">')
 
-    # Dock marker (orange triangle pointing up = "home").
+        info = data.grid_map_data.get("map_info", {})
+        g_res = info.get("resolution", 0.05)
+        g_ox = info.get("origin_x", 0.0)
+        g_oy = info.get("origin_y", 0.0)
+        px_sz = max(scale * g_res, 0.4)
+
+        def _emit_run(gx: int, gy: int, length: int, color: str, opacity: str) -> None:
+            sx, sy = to_svg(g_ox + gx * g_res, g_oy + gy * g_res)
+            parts.append(
+                f'<rect x="{sx}" y="{round(sy - px_sz, 1)}" '
+                f'width="{round(length * px_sz + 0.1, 1)}" '
+                f'height="{round(px_sz + 0.1, 1)}" fill="{color}" opacity="{opacity}"/>'
+            )
+
+        def _draw_grid(cells: list[tuple[int, int]], color: str, opacity: str) -> None:
+            cells.sort(key=lambda c: (c[1], c[0]))
+            for gy, row in groupby(cells, key=lambda c: c[1]):
+                xs2 = [c[0] for c in row]
+                start = prev = xs2[0]
+                for x in xs2[1:]:
+                    if x == prev + 1:
+                        prev = x
+                    else:
+                        _emit_run(start, gy, prev - start + 1, color, opacity)
+                        start = prev = x
+                _emit_run(start, gy, prev - start + 1, color, opacity)
+
+        # _draw_grid(decode_grid_cells(data.grid_map_data, categories=(0,)), "#5a6473", "0.95")
+        _draw_grid(decode_grid_cells(data.grid_map_data), "#78a0d2", "0.5")
+
+        if clip_polys:
+            parts.append('</g>')
+
+    # Carpet zones (darker texture)
+    for c in data.carpet_polys:
+        verts = c.get("vertices", [])
+        if len(verts) >= 3:
+            svg_verts = [to_svg(v["x"], v["y"]) for v in verts]
+            pts_str = " ".join(f"{x},{y}" for x, y in svg_verts)
+            parts.append(
+                f'<polygon points="{pts_str}" fill="url(#rc)" stroke="none"/>'
+            )
+
+    # Restricted zones (red hatched or semi-transparent red)
+    for r in data.restricted_polys:
+        verts = r.get("vertices", [])
+        if len(verts) >= 3:
+            svg_verts = [to_svg(v["x"], v["y"]) for v in verts]
+            pts_str = " ".join(f"{x},{y}" for x, y in svg_verts)
+            parts.append(
+                f'<polygon points="{pts_str}" fill="url(#ng)" stroke="none" opacity="0.5"/>'
+            )
+
+    # Virtual walls (red lines)
+    for vw in data.virtual_walls:
+        verts = vw.get("vertices", [])
+        if len(verts) == 2:
+            x1, y1 = to_svg(verts[0]["x"], verts[0]["y"])
+            x2, y2 = to_svg(verts[1]["x"], verts[1]["y"])
+            parts.append(
+                f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" '
+                f'stroke="#dc3c32" stroke-width="2" stroke-linecap="round"/>'
+            )
+
+    # Cleaning trace
+    segs: list[list[tuple[float, float]]] = []
+    band: list[tuple[float, float]] = []
+    prev_pt: tuple[float, float] | None = None
+    for x, y in trajectory:
+        if prev_pt is not None and ((x - prev_pt[0]) ** 2 + (y - prev_pt[1]) ** 2) ** 0.5 <= 0.6:
+            band.append(to_svg(x, y))
+        else:
+            if len(band) > 1:
+                segs.append(band)
+            band = [to_svg(x, y)]
+        prev_pt = (x, y)
+    if len(band) > 1:
+        segs.append(band)
+    elif len(band) == 1 and not segs:
+        sx, sy = band[0]
+        parts.append(f'<circle cx="{sx}" cy="{sy}" r="1.5" fill="#2d78e1" opacity="0.9"/>')
+    for band in segs:
+        pstr = " ".join(f"{x},{y}" for x, y in band)
+        parts.append(
+            f'<polyline points="{pstr}" fill="none" stroke="#2d78e1" stroke-width="0.5" '
+            f'stroke-linejoin="round" stroke-linecap="round" opacity="0.9"/>'
+        )
+
+    # Dock marker
     if dock_x is not None and dock_y is not None:
         sx, sy = to_svg(dock_x, dock_y)
         parts.append(
-            f'<polygon points="{sx},{sy - 8} {sx - 6},{sy + 4} {sx + 6},{sy + 4}" '
-            f'fill="#e67e22" opacity="0.9"/>'
-            f'<rect x="{sx - 3}" y="{sy}" width="6" height="4" fill="#e67e22" opacity="0.9"/>'
+            f'<g transform="translate({sx} {sy}) scale(0.6)">'
+            f'<rect x="-5" y="-6" width="10" height="12" rx="2" fill="#151515"/>'
+            f'<path d="M 1,-3.5 L -2,0.5 H -0.5 L -1.5,4 L 2,-0.5 H 0.5 Z" fill="white"/>'
+            f'</g>'
         )
 
-    # Detected obstacles (furniture legs, toys) — small warning diamonds.
+    # Detected obstacles (orange circles)
     for ox, oy in data.obstacles:
         sx, sy = to_svg(ox, oy)
         parts.append(
-            f'<polygon points="{sx},{sy - 4} {sx + 4},{sy} {sx},{sy + 4} {sx - 4},{sy}" '
-            f'fill="#e74c3c" opacity="0.75"/>'
+            f'<circle cx="{sx}" cy="{sy}" r="3.6" fill="#ff9614" stroke="#3c2800" stroke-width="0.5"/>'
         )
 
-    # Robot marker: compact top view of the white Romo body with its dark front
-    # sensor. DJI yaw is an angle from the map X axis, so rotate the marker in
-    # SVG space instead of treating it as a compass heading.
+    # Robot marker
     if robot_x is not None and robot_y is not None:
         sx, sy = to_svg(robot_x, robot_y)
         parts.append(
@@ -269,18 +395,19 @@ def _generate_map_svg(data: RomoSnapshot, robot_image_uri: str | None = None) ->
     if rooms:
         sep_y = map_block_h
         parts.append(
-            f'<line x1="10" y1="{sep_y}" x2="290" y2="{sep_y}" '
-            f'stroke="#3a3a3a" stroke-width="1"/>'
+            f'<line x1="10" y1="{sep_y}" x2="{svg_w - 10}" y2="{sep_y}" '
+            f'stroke="#c0c0c0" stroke-width="1"/>'
         )
+        col_width = svg_w / 2
         for i, room in enumerate(rooms):
             col = i % 2
             row = i // 2
             name = room.get("name", f"Room {room.get('poly_index', '')}")
             area = room.get("area", 0)
             active = name == data.current_room
-            fill = "#3498db" if active else "#999"
+            fill = "#3498db" if active else "#282d37"
             prefix = "▶ " if active else "• "
-            rx_text = 15 + col * 148
+            rx_text = round(15 + col * col_width, 1)
             ry_text = sep_y + 14 + row * 14
             parts.append(
                 f'<text x="{rx_text}" y="{ry_text}" fill="{fill}" '
@@ -290,6 +417,315 @@ def _generate_map_svg(data: RomoSnapshot, robot_image_uri: str | None = None) ->
 
     parts.append("</svg>")
     return "\n".join(parts)
+
+
+def _generate_report_svg(data: RomoSnapshot, robot_image_uri: str | None = None) -> str:
+    """Render a completed job's ``room_map`` snapshot as the cleaning-report SVG.
+
+    Light theme matching the DJI app report: white rooms + labels, the occupancy
+    grid as scan detail, carpets and no-go zones hatched, the dense ``history_path``
+    sweep trace, detected obstacles, and the robot/station markers.
+    """
+    report_map = data.last_clean_map or {}
+    seg = report_map.get("seg_map", {}) or {}
+    polys = [
+        p for p in seg.get("poly_info", []) if len(p.get("border_vertices", [])) >= 3
+    ]
+    history = (report_map.get("history_path") or {}).get("history_path") or []
+
+    pts: list[tuple[float, float]] = [
+        (v["x"], v["y"]) for p in polys for v in p["border_vertices"]
+    ]
+    pts.extend((q[0], q[1]) for q in history)
+    if not pts:
+        return _EMPTY_SVG
+
+    map_rotation = _map_alignment_rotation(polys)
+
+    def rotate_map_point(px: float, py: float) -> tuple[float, float]:
+        if not map_rotation:
+            return px, py
+        angle = radians(map_rotation)
+        c, s = cos(angle), sin(angle)
+        return px * c - py * s, px * s + py * c
+
+    rotated_pts = [rotate_map_point(x, y) for x, y in pts]
+    xs = [p[0] for p in rotated_pts]
+    ys = [p[1] for p in rotated_pts]
+    pad = 0.3
+    min_x, max_x = min(xs) - pad, max(xs) + pad
+    min_y, max_y = min(ys) - pad, max(ys) + pad
+    span_x = max(max_x - min_x, 0.5)
+    span_y = max(max_y - min_y, 0.5)
+
+    canvas_w, canvas_h = 276.0, 220.0
+    margin = 12.0
+    scale = min(canvas_w / span_x, canvas_h / span_y)
+    svg_w = round(canvas_w + 2 * margin, 1)
+    map_block_h = round(canvas_h + 2 * margin, 1)
+    draw_x = margin + (canvas_w - span_x * scale) / 2
+    draw_y = margin + (canvas_h - span_y * scale) / 2
+
+    rooms = data.rooms
+    n_rows = (len(rooms) + 1) // 2 if rooms else 0
+    legend_h = 5 + n_rows * 14 if rooms else 0
+    svg_h = round(map_block_h + legend_h, 1)
+
+    def to_svg(px: float, py: float) -> tuple[float, float]:
+        tx, ty = rotate_map_point(px, py)
+        return (
+            round(draw_x + (tx - min_x) * scale, 1),
+            round(draw_y + (max_y - ty) * scale, 1),
+        )
+
+    parts: list[str] = [
+        f'<svg viewBox="0 0 {svg_w} {svg_h}" xmlns="http://www.w3.org/2000/svg">',
+        '<defs>'
+        # Carpet: light-grey dotted texture matching the DJI app — a square dot
+        # grid rotated 45° (two dots on the tile diagonal), so successive rows are
+        # offset by half the horizontal period for the app's staggered "damier" look.
+        '<pattern id="rc" width="5" height="5" patternUnits="userSpaceOnUse">'
+        '<rect x="0.35" y="0.35" width="1.8" height="1.8" fill="#cfd0d0"/>'
+        '<rect x="2.85" y="2.85" width="1.8" height="1.8" fill="#cfd0d0"/></pattern>'
+        # No-go zone: thick diagonal salmon stripes (≈50/50 stripe/gap) matching the
+        # DJI app. Base colours are pre-multiplied so the polygon's opacity="0.5"
+        # composites to the app's measured colours over a white room (#f0c7c0 gap /
+        # #f1a69a stripe) while staying translucent over carpet/grid underneath.
+        '<pattern id="ng" width="7.5" height="7.5" patternUnits="userSpaceOnUse" '
+        'patternTransform="rotate(45)">'
+        '<rect width="7.5" height="7.5" fill="#e18f81"/>'
+        '<rect width="3.8" height="7.5" fill="#e34d35"/></pattern>'
+        '</defs>',
+        f'<rect width="{svg_w}" height="{svg_h}" fill="#e8eaee" rx="6"/>',
+    ]
+
+    dup = duplicate_label_ids(polys)
+
+    # Rooms. Each room carries two outlines: ``border_vertices`` (the simplified
+    # nominal room) and ``vertices`` (the actual scanned floor, which carves out
+    # furniture/obstacles standing against the walls). Filling the nominal room
+    # grey first, then the accessible floor light on top, leaves the blocked spots
+    # grey — reproducing the DJI app's "grey zones" inside/at the edges of rooms.
+    for p in polys:
+        sv = [to_svg(v["x"], v["y"]) for v in p["border_vertices"]]
+        pstr = " ".join(f"{x},{y}" for x, y in sv)
+        parts.append(f'<polygon points="{pstr}" fill="#d6d8db"/>')
+    for p in polys:
+        vv = p.get("vertices", [])
+        if len(vv) >= 3:
+            sv = [to_svg(v["x"], v["y"]) for v in vv]
+            pstr = " ".join(f"{x},{y}" for x, y in sv)
+            parts.append(f'<polygon points="{pstr}" fill="#f3f4f5"/>')
+    for p in polys:
+        sv = [to_svg(v["x"], v["y"]) for v in p["border_vertices"]]
+        pstr = " ".join(f"{x},{y}" for x, y in sv)
+        parts.append(
+            f'<polygon points="{pstr}" fill="none" stroke="#96a0af" stroke-width="0.8"/>'
+        )
+
+    # Occupancy grid: category-0 walls (grey) under the scanned detail (1+, blue),
+    # each merged into horizontal runs. Matches the validated report look.
+    grid = report_map.get("grid_map")
+    if grid:
+        clip_polys = []
+        for p in polys:
+            vs = p.get("border_vertices") or []
+            if vs:
+                pts = " ".join(f"{to_svg(v['x'], v['y'])[0]},{to_svg(v['x'], v['y'])[1]}" for v in vs)
+                clip_polys.append(f'<polygon points="{pts}"/>')
+                
+        if clip_polys:
+            parts.append('<defs><clipPath id="report_floor_clip">')
+            parts.extend(clip_polys)
+            parts.append('</clipPath></defs>')
+            parts.append('<g clip-path="url(#report_floor_clip)">')
+
+        info = grid.get("map_info", {})
+        g_res = info.get("resolution", 0.05)
+        g_ox = info.get("origin_x", 0.0)
+        g_oy = info.get("origin_y", 0.0)
+        px_sz = max(scale * g_res, 0.4)
+
+        def _emit_run(gx: int, gy: int, length: int, color: str, opacity: str) -> None:
+            sx, sy = to_svg(g_ox + gx * g_res, g_oy + gy * g_res)
+            parts.append(
+                f'<rect x="{sx}" y="{round(sy - px_sz, 1)}" '
+                f'width="{round(length * px_sz + 0.1, 1)}" '
+                f'height="{round(px_sz + 0.1, 1)}" fill="{color}" opacity="{opacity}"/>'
+            )
+
+        def _draw_grid(cells: list[tuple[int, int]], color: str, opacity: str) -> None:
+            cells.sort(key=lambda c: (c[1], c[0]))
+            for gy, row in groupby(cells, key=lambda c: c[1]):
+                xs2 = [c[0] for c in row]
+                start = prev = xs2[0]
+                for x in xs2[1:]:
+                    if x == prev + 1:
+                        prev = x
+                    else:
+                        _emit_run(start, gy, prev - start + 1, color, opacity)
+                        start = prev = x
+                _emit_run(start, gy, prev - start + 1, color, opacity)
+
+        # _draw_grid(decode_grid_cells(grid, categories=(0,)), "#5a6473", "0.95")
+        _draw_grid(decode_grid_cells(grid), "#78a0d2", "0.5")
+
+        if clip_polys:
+            parts.append('</g>')
+
+    # Carpets + no-go zones (hatched).
+    for c in (report_map.get("carpet_layer") or {}).get("data", []):
+        vs = c.get("vertices", [])
+        if len(vs) >= 3:
+            pstr = " ".join("{},{}".format(*to_svg(v["x"], v["y"])) for v in vs)
+            parts.append(
+                f'<polygon points="{pstr}" fill="url(#rc)" stroke="none"/>'
+            )
+    for r in (report_map.get("restricted_layer") or {}).get("data", []):
+        vs = r.get("vertices", [])
+        if len(vs) >= 3:
+            pstr = " ".join("{},{}".format(*to_svg(v["x"], v["y"])) for v in vs)
+            parts.append(
+                f'<polygon points="{pstr}" fill="url(#ng)" stroke="none" opacity="0.5"/>'
+            )
+    for vw in (report_map.get("virtual_wall") or {}).get("data", []):
+        vs = vw.get("vertices", [])
+        if len(vs) == 2:
+            x1, y1 = to_svg(vs[0]["x"], vs[0]["y"])
+            x2, y2 = to_svg(vs[1]["x"], vs[1]["y"])
+            parts.append(
+                f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" '
+                f'stroke="#dc3c32" stroke-width="2" stroke-linecap="round"/>'
+            )
+
+    # Sweep trace (history_path). Each point is [x, y, yaw, flag, type, width].
+    # Only the actual *cleaning* passes are drawn — col4 `type` in CLEAN_PASS_TYPES:
+    # 80 (main boustrophedon sweep), 48 (room-perimeter pass) and 112 (edge detail).
+    # The other types are inter-room transit (32/128) or in-room navigation / obstacle
+    # maneuvering (96/64) that the DJI app does NOT trace; those points — and any jump
+    # > 0.6 m — break the polyline (so transit moves leave a gap, matching the app).
+    CLEAN_PASS_TYPES = (48, 80, 112)
+    segs: list[list[tuple[float, float]]] = []
+    band: list[tuple[float, float]] = []
+    prev_pt: tuple[float, float] | None = None
+    for q in history:
+        x, y = q[0], q[1]
+        is_clean = len(q) > 4 and q[4] in CLEAN_PASS_TYPES
+        if (
+            is_clean
+            and prev_pt is not None
+            and ((x - prev_pt[0]) ** 2 + (y - prev_pt[1]) ** 2) ** 0.5 <= 0.6
+        ):
+            band.append(to_svg(x, y))
+        else:
+            if len(band) > 1:
+                segs.append(band)
+            band = [to_svg(x, y)] if is_clean else []
+        prev_pt = (x, y) if is_clean else None
+    if len(band) > 1:
+        segs.append(band)
+    for band in segs:
+        pstr = " ".join(f"{x},{y}" for x, y in band)
+        parts.append(
+            f'<polyline points="{pstr}" fill="none" stroke="#2d78e1" stroke-width="0.5" '
+            f'stroke-linejoin="round" stroke-linecap="round" opacity="0.9"/>'
+        )
+
+    # Obstacles (orange).
+    for o in (report_map.get("obstacle_layer") or {}).get("data", []):
+        vs = o.get("vertices", [])
+        if vs:
+            sx, sy = to_svg(vs[0]["x"], vs[0]["y"])
+            parts.append(
+                f'<circle cx="{sx}" cy="{sy}" r="3.6" fill="#ff9614" '
+                f'stroke="#3c2800" stroke-width="0.5"/>'
+            )
+
+    # Station (orange ring) + robot (green dot).
+    st = report_map.get("station_pos") or {}
+    if st.get("station_position_x") is not None:
+        sx, sy = to_svg(st["station_position_x"], st["station_position_y"])
+        parts.append(
+            f'<g transform="translate({sx} {sy}) scale(0.6)">'
+            f'<rect x="-5" y="-6" width="10" height="12" rx="2" fill="#151515"/>'
+            f'<path d="M 1,-3.5 L -2,0.5 H -0.5 L -1.5,4 L 2,-0.5 H 0.5 Z" fill="white"/>'
+            f'</g>'
+        )
+    rb = report_map.get("robot_pos") or {}
+    if rb.get("crobot_position_x") is not None:
+        sx, sy = to_svg(rb["crobot_position_x"], rb["crobot_position_y"])
+        yaw = None
+        if "crobot_direction" in rb:
+            yaw = degrees(rb["crobot_direction"])
+        parts.append(
+            _robot_marker_svg(
+                sx,
+                sy,
+                yaw,
+                map_rotation,
+                robot_image_uri,
+            )
+        )
+
+    # Room labels.
+    for p in polys:
+        name = room_name(p, dup)
+        if not name:
+            continue
+        sv = [to_svg(v["x"], v["y"]) for v in p["border_vertices"]]
+        cx, cy = _polygon_centroid(sv)
+        parts.append(
+            f'<text x="{cx}" y="{cy}" text-anchor="middle" dominant-baseline="middle" '
+            f'font-size="7.5" fill="#282d37" font-family="sans-serif">{name[:14]}</text>'
+        )
+
+    # Room legend (2 columns).
+    if rooms:
+        sep_y = map_block_h
+        parts.append(
+            f'<line x1="10" y1="{sep_y}" x2="{svg_w - 10}" y2="{sep_y}" '
+            f'stroke="#c0c0c0" stroke-width="1"/>'
+        )
+        col_width = svg_w / 2
+        for i, room in enumerate(rooms):
+            col = i % 2
+            row = i // 2
+            name = room.get("name", f"Room {room.get('poly_index', '')}")
+            area = room.get("area", 0)
+            active = name == data.current_room
+            fill = "#3498db" if active else "#282d37"
+            prefix = "▶ " if active else "• "
+            rx_text = round(15 + col * col_width, 1)
+            ry_text = sep_y + 14 + row * 14
+            parts.append(
+                f'<text x="{rx_text}" y="{ry_text}" fill="{fill}" '
+                f'font-size="9" font-family="sans-serif">'
+                f'{prefix}{name}: {area:.0f} m²</text>'
+            )
+
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def _polygon_centroid(vertices: list[tuple[float, float]]) -> tuple[float, float]:
+    """Calculate the geometric centroid of a non-intersecting polygon."""
+    area = 0.0
+    cx = 0.0
+    cy = 0.0
+    n = len(vertices)
+    if n == 0:
+        return 0.0, 0.0
+    for i in range(n):
+        x0, y0 = vertices[i]
+        x1, y1 = vertices[(i + 1) % n]
+        cross = x0 * y1 - x1 * y0
+        area += cross
+        cx += (x0 + x1) * cross
+        cy += (y0 + y1) * cross
+    area /= 2.0
+    if area == 0:
+        return vertices[0]
+    return round(cx / (6.0 * area), 1), round(cy / (6.0 * area), 1)
 
 
 def _map_alignment_rotation(polys: list[dict]) -> float:
@@ -369,8 +805,9 @@ def _robot_marker_fallback_svg(
     rotation = 0 if yaw is None else round(-yaw - map_rotation, 1)
     x = round(sx - 10, 1)
     y = round(sy - 8, 1)
+    scale = round(_ROBOT_MARKER_SIZE / 26.0, 2)
     return (
-        f'<g transform="rotate({rotation} {sx} {sy})">'
+        f'<g transform="translate({sx} {sy}) rotate({rotation}) scale({scale}) translate({-sx} {-sy})">'
         f'<ellipse cx="{sx}" cy="{sy}" rx="12" ry="9.5" fill="#0f1720" opacity="0.22"/>'
         f'<rect x="{x}" y="{y}" width="20" height="16" rx="5" '
         f'fill="#f4f8f9" stroke="white" stroke-width="1.2"/>'

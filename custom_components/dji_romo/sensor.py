@@ -326,6 +326,7 @@ SENSORS: tuple[DjiRomoSensorDescription, ...] = (
     DjiRomoSensorDescription(
         key="distance_to_dock",
         name="Distance to Dock",
+        entity_registry_enabled_default=False,
         native_unit_of_measurement=UnitOfLength.METERS,
         device_class=SensorDeviceClass.DISTANCE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -483,60 +484,12 @@ SENSORS: tuple[DjiRomoSensorDescription, ...] = (
         icon="mdi:timer-sand",
         value_fn=lambda coordinator: _drying_remaining_minutes(coordinator),
     ),
-    DjiRomoSensorDescription(
-        key="device_volume",
-        name="Device Volume",
-        native_unit_of_measurement=PERCENTAGE,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: _cloud_path(coordinator, "settings.device_volume"),
-    ),
-    DjiRomoSensorDescription(
-        key="device_language",
-        name="Device Language",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: _cloud_path(coordinator, "settings.device_language"),
-    ),
-    DjiRomoSensorDescription(
-        key="auto_dust_collect",
-        name="Auto Dust Collect",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: _cloud_path(
-            coordinator, "settings.dust_collect.collect_mode"
-        ),
-        attrs_fn=lambda coordinator: _cloud_path(
-            coordinator, "settings.dust_collect"
-        )
-        or {},
-    ),
-    DjiRomoSensorDescription(
-        key="auto_drying",
-        name="Auto Drying",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: _cloud_path(
-            coordinator, "settings.drying.auto_enable"
-        ),
-        attrs_fn=lambda coordinator: _cloud_path(coordinator, "settings.drying") or {},
-    ),
-    DjiRomoSensorDescription(
-        key="hot_water_mop",
-        name="Hot Water Mopping",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: _cloud_path(
-            coordinator, "settings.wash_mop_with_hot_water"
-        ),
-    ),
-    DjiRomoSensorDescription(
-        key="auto_add_cleaner",
-        name="Auto Add Cleaner",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: _cloud_path(
-            coordinator, "settings.add_cleaner_auto.is_add_in_mop"
-        ),
-        attrs_fn=lambda coordinator: _cloud_path(
-            coordinator, "settings.add_cleaner_auto"
-        )
-        or {},
-    ),
+    # Device volume is now a writable number (see number.py).
+    # Voice language is now a writable select (see select.py).
+    # Dust collection mode is now a writable select (see select.py).
+    # Auto drying is now a writable switch (see switch.py).
+    # Hot water mopping is now a writable switch (see switch.py).
+    # Auto add cleaner is now a writable switch (see switch.py).
 )
 
 

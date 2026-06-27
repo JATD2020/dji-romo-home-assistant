@@ -137,24 +137,6 @@
       "last_clean_end": {
         "name": "Fin du dernier nettoyage"
       },
-      "device_volume": {
-        "name": "Volume de l'appareil"
-      },
-      "device_language": {
-        "name": "Langue de l'appareil"
-      },
-      "auto_dust_collect": {
-        "name": "Aspiration auto des poussières"
-      },
-      "auto_drying": {
-        "name": "Séchage automatique"
-      },
-      "hot_water_mop": {
-        "name": "Serpillière à l'eau chaude"
-      },
-      "auto_add_cleaner": {
-        "name": "Ajout auto de solution"
-      },
       "current_room": {
         "name": "Pièce en cours de nettoyage"
       },
@@ -232,26 +214,8 @@
       "dust_bag_uv": {
         "name": "Lampe UV du sac"
       },
-      "battery_care": {
-        "name": "Préservation batterie"
-      },
-      "child_lock": {
-        "name": "Verrouillage enfant"
-      },
-      "do_not_disturb": {
-        "name": "Ne pas déranger"
-      },
-      "auto_dust_box_drying": {
-        "name": "Séchage auto du bac à poussière"
-      },
-      "carpet_detection": {
-        "name": "Détection de tapis"
-      },
       "pet_care": {
         "name": "Mode animaux"
-      },
-      "ai_obstacle_recognition": {
-        "name": "Reconnaissance d'obstacles IA"
       },
       "auto_mop_wash": {
         "name": "Lavage auto serpillière"
@@ -261,9 +225,6 @@
       },
       "mop_deodorizer": {
         "name": "Désodorisant serpillière"
-      },
-      "enhanced_particle_cleaning": {
-        "name": "Nettoyage renforcé particules"
       },
       "enhanced_stain_cleaning": {
         "name": "Nettoyage renforcé taches"
@@ -284,11 +245,90 @@
       },
       "room_clean_speed": {
         "name": "Vitesse de serpillière des pièces"
+      },
+      "drying_mode": {
+        "name": "Durée de séchage"
+      },
+      "cleaning_frequency": {
+        "name": "Fréquence de nettoyage"
+      },
+      "liquid_response": {
+        "name": "Réponse liquide"
+      },
+      "obstacle_handling": {
+        "name": "Gestion des obstacles"
+      },
+      "low_clearance_mode": {
+        "name": "Mode de nettoyage à faible dégagement"
+      },
+      "carpet_behavior": {
+        "name": "Comportement sur tapis"
+      },
+      "voice_language": {
+        "name": "Langue (voix)"
+      },
+      "dust_collect_mode": {
+        "name": "Mode de collecte des poussières"
+      },
+      "dust_collect_days": {
+        "name": "Jours de collecte"
       }
     },
     "number": {
       "room_clean_num": {
         "name": "Passages de nettoyage des pièces"
+      },
+      "device_volume": {
+        "name": "Volume"
+      }
+    },
+    "switch": {
+      "child_lock": {
+        "name": "Verrouillage enfant"
+      },
+      "cliff_detection": {
+        "name": "Détection du vide"
+      },
+      "battery_care": {
+        "name": "Préservation batterie"
+      },
+      "do_not_disturb": {
+        "name": "Ne pas déranger"
+      },
+      "hot_water_mop": {
+        "name": "Serpillière à l'eau chaude"
+      },
+      "auto_add_cleaner": {
+        "name": "Ajout auto de solution"
+      },
+      "enhanced_particle_cleaning": {
+        "name": "Nettoyage renforcé particules"
+      },
+      "auto_dust_box_drying": {
+        "name": "Séchage auto du bac à poussière"
+      },
+      "auto_drying": {
+        "name": "Séchage automatique"
+      },
+      "kitchen_bathroom_wet_wash": {
+        "name": "Lavage humide cuisine et toilettes"
+      },
+      "ai_obstacle_recognition": {
+        "name": "Contournement intelligent des obstacles"
+      },
+      "obstacle_photo": {
+        "name": "Photos d'obstacles"
+      }
+    },
+    "time": {
+      "dnd_start": {
+        "name": "Début Ne pas déranger"
+      },
+      "dnd_end": {
+        "name": "Fin Ne pas déranger"
+      },
+      "dust_collect_time": {
+        "name": "Heure de collecte"
       }
     },
     "button": {
