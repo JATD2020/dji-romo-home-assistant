@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime, timedelta
 import logging
+from math import atan2, degrees
 from typing import Any
 from uuid import uuid4
 
@@ -27,7 +29,7 @@ from .client import (
 )
 from .const import (
     AVAILABILITY_CHECK_INTERVAL,
-    CLEANING_REFRESH_INTERVAL,
+    CLEAN_PASS_TYPES,
     CLOUD_REFRESH_FAILURE_LIMIT,
     CONF_COMMAND_MAPPING,
     CONF_COMMAND_TOPIC,
@@ -48,6 +50,7 @@ from .const import (
     MQTT_STALE_AFTER,
     OFFLINE_AFTER,
     STATIC_REFRESH_INTERVAL,
+    TERMINAL_JOB_STATUSES,
     TRAJECTORY_MAX_POINTS,
     TRAJECTORY_SAVE_DELAY,
     TRAJECTORY_STORAGE_KEY,
@@ -63,28 +66,6 @@ _LOGGER = logging.getLogger(__name__)
 type DjiRomoConfigEntry = ConfigEntry[DjiRomoCoordinator]
 AUTH_REPAIR_ISSUE_ID = "auth_failed"
 ACTIVITY_CONFIRMATION_COUNT = 2
-# Job statuses that mean the job is finished (verified live: DJI returns "ok" for
-# a successful run and "canceled" for an aborted one). Anything not in this set is
-# treated as an active job. We avoid hard-coding the *running* status string since
-# it is not observable while the robot is docked.
-TERMINAL_JOB_STATUSES = frozenset(
-    {
-        "ok",
-        "canceled",
-        "cancelled",
-        "completed",
-        "complete",
-        "failed",
-        "fail",
-        "error",
-        "stopped",
-        "stop",
-        "timeout",
-        "interrupted",
-        "abort",
-        "aborted",
-    }
-)
 ACTIVITY_HOLD_DURATION = timedelta(seconds=20)
 DEFAULT_ROOM_CLEANING_OPTIONS = {
     CONF_ROOM_CLEAN_MODE: 2,
@@ -116,6 +97,24 @@ MEANINGFUL_STATE_KEYS = (
     "battery_care_active",
     "dust_bag_uv_enable",
     "hatch_status",
+)
+# Snapshot fields owned by the live MQTT stream. The REST refresh only *seeds*
+# them so entities have values before the first osd message; when a REST poll
+# overlaps live pushes, the rebase in _async_update_data keeps the pushed value
+# for these instead of reverting to the (older) seed for up to one osd cycle.
+LIVE_SEEDED_FIELDS = frozenset(
+    {
+        "battery_level",
+        "robot_x",
+        "robot_y",
+        "robot_yaw",
+        "dock_x",
+        "dock_y",
+        "charger_connected",
+        "battery_care_active",
+        "dust_bag_uv_enable",
+        "hatch_status",
+    }
 )
 
 
@@ -206,7 +205,12 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             _LOGGER,
             config_entry=entry,
             name="DJI Romo",
-            update_interval=COORDINATOR_REFRESH_INTERVAL,
+            # No internal poll interval: every MQTT push goes through
+            # async_set_updated_data, which cancels and re-arms the internal
+            # timer — with the robot online (osd ~1/sec) a scheduled refresh
+            # would never fire. The REST poll runs off the dedicated
+            # _rest_poll_unsub timer instead, which pushes cannot reset.
+            update_interval=None,
         )
         self.entry = entry
         self.api = api
@@ -221,6 +225,10 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         # least once this (re)start. A restored floor plan would otherwise skip the
         # REST map fetch, leaving these layers empty until the 6h refresh.
         self._map_overlays_seeded: bool = False
+        # When the map/overlays were last fetched over REST. Drives the periodic
+        # ~6h refetch (snapshot.cloud_last_updated can't: it is rewritten to "now"
+        # earlier in the same refresh, so a check against it never fires).
+        self._map_overlays_fetched_at: datetime | None = None
         # Identity + revision of the DJI map our cached/persisted overlays belong to.
         # map_index is stable per physical map and changes on a map reset (=> drop all
         # cached map state); map_version bumps on every edit (=> refetch the overlays
@@ -240,6 +248,15 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         # drops seamlessly with the same client (and re-subscribes via on_connect).
         # We only step in for sustained outages, from the availability timer.
         self._mqtt = DjiRomoMqttClient(hass.loop, self._handle_mqtt_message)
+        # Serializes credential refresh + connect: _async_ensure_mqtt is called by
+        # both the refresh cycle and user commands (_async_publish); interleaving
+        # across its awaits could build two paho clients and leak the first one's
+        # network thread, or tear down a session that just came up.
+        self._mqtt_connect_lock = asyncio.Lock()
+        # bids of commands we published. The wildcard subscription also covers the
+        # command topic and MQTT 3.1.1 has no "no local": the broker echoes our
+        # own publishes back, and an echo must not count as robot traffic.
+        self._sent_bids: deque[str] = deque(maxlen=32)
         self._mqtt_down_checks = 0
         self._mqtt_recovering = False
         # Consecutive REST refresh failures; entities go unavailable past the limit.
@@ -249,11 +266,16 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         # under this lock, after the previous write's optimistic patch landed.
         self._settings_write_lock = asyncio.Lock()
         self._availability_unsub: CALLBACK_TYPE | None = None
+        self._rest_poll_unsub: CALLBACK_TYPE | None = None
         self._pending_activity: str | None = None
         self._pending_activity_count = 0
         self._held_activity: str | None = None
         self._activity_hold_until: datetime | None = None
         self._paths_unsub: CALLBACK_TYPE | None = None
+        # True while a /paths drain is in flight. A drain can span several network
+        # round-trips and outlast the 2 s tick; overlapping drains would both read
+        # the same cursor and append duplicate points to the trace.
+        self._paths_polling: bool = False
         self._paths_next_index: int = 0
         # False until the first /paths poll of this (re)start has rebuilt the trace
         # from the cloud (index 0). Ensures a restart mid-clean shows the full
@@ -286,6 +308,7 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         try:
             meta = await self.api.async_get_current_map_meta()
         except Exception:  # noqa: BLE001
+            _LOGGER.debug("DJI Romo map meta fetch failed during setup", exc_info=True)
             meta = None
         if meta and meta.get("map_index") is not None:
             self._map_index = meta.get("map_index")
@@ -294,6 +317,11 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             self.hass,
             self._async_check_availability,
             AVAILABILITY_CHECK_INTERVAL,
+        )
+        self._rest_poll_unsub = async_track_time_interval(
+            self.hass,
+            self._async_rest_poll_tick,
+            COORDINATOR_REFRESH_INTERVAL,
         )
 
     async def _async_update_data(self) -> RomoSnapshot:
@@ -304,26 +332,43 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             or self.entry.data[CONF_DEVICE_NAME]
         )
 
-        if self.data is not None:
-            snapshot = replace(self.data)
+        base = self.data
+        if base is not None:
+            snapshot = replace(base)
         else:
             snapshot = RomoSnapshot()
             self._seed_from_restore(snapshot)
         await self._async_refresh_cloud_data(snapshot)
 
-        # Poll faster while cleaning so the "current room" sensor tracks the plan.
-        self.update_interval = (
-            CLEANING_REFRESH_INTERVAL
-            if snapshot.activity == "cleaning"
-            else COORDINATOR_REFRESH_INTERVAL
-        )
-        return snapshot
+        latest = self.data
+        if base is None or latest is base:
+            return snapshot
+        # MQTT/paths pushes replaced self.data while the REST fetch was awaiting.
+        # Returning ``snapshot`` (a copy of the pre-fetch state) would clobber
+        # those live updates (positions, grid, trajectory appends), so rebase the
+        # refresh onto the pushed snapshot instead. This runs synchronously after
+        # the last await — and MQTT handlers run in the event loop — so nothing
+        # can interleave between the merge and HA storing the result.
+        return _rebase_rest_fields(base, snapshot, latest)
+
+    async def _async_rest_poll_tick(self, _now: datetime) -> None:
+        """Run the periodic REST poll from a timer MQTT pushes cannot reset.
+
+        Deliberately not async_request_refresh: its debounced call is cancelled
+        by any async_set_updated_data, so with the robot pushing osd ~1/sec a
+        queued debounced refresh would routinely be lost.
+        """
+        await self.async_refresh()
 
     async def async_shutdown(self) -> None:
         """Stop MQTT alongside coordinator shutdown."""
         if self._availability_unsub is not None:
             self._availability_unsub()
             self._availability_unsub = None
+        if self._rest_poll_unsub is not None:
+            self._rest_poll_unsub()
+            self._rest_poll_unsub = None
+        self._stop_paths_poll()
         await self._mqtt.async_disconnect()
         await super().async_shutdown()
 
@@ -431,7 +476,18 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         if not bid or self.data.activity != "cleaning":
             self._stop_paths_poll()
             return
+        if self._paths_polling:
+            # A drain outlasted the 2 s tick; running two concurrently would read
+            # the same cursor and append the same points twice.
+            return
+        self._paths_polling = True
+        try:
+            await self._async_drain_paths(bid)
+        finally:
+            self._paths_polling = False
 
+    async def _async_drain_paths(self, bid: str) -> None:
+        """Drain the available /paths pages and merge them into the trace."""
         # First poll since (re)start: re-read the whole trace from the cloud (index 0)
         # and replace the restored cache, instead of resuming the cached cursor.
         rebuild = not self._paths_backfilled
@@ -439,7 +495,6 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             self._paths_next_index = 0
 
         # Keep only drawn pass types; x/y are cols 0/1, type is col 4.
-        DRAWN_TYPES = {48, 80, 112}
         new_pts: list[tuple[float, float]] = []
         for _ in range(500):  # safety cap on pages per tick
             result = await self.api.async_get_live_paths(bid, self._paths_next_index)
@@ -447,7 +502,7 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
                 break
             data = result.get("data") or {}
             for pt in data.get("history_path") or []:
-                if len(pt) >= 5 and int(pt[4]) in DRAWN_TYPES:
+                if len(pt) >= 5 and int(pt[4]) in CLEAN_PASS_TYPES:
                     new_pts.append((float(pt[0]), float(pt[1])))
             new_end: int = data.get("end_index", self._paths_next_index)
             advanced = new_end > self._paths_next_index
@@ -466,7 +521,9 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         # trace; afterwards, append forward increments. Cap as a memory safety net.
         self._paths_backfilled = True
         prev: list[tuple[float, float]] = [] if rebuild else self.data.trajectory
-        merged = list(prev[-(TRAJECTORY_MAX_POINTS - len(new_pts)):]) + new_pts
+        new_pts = new_pts[-TRAJECTORY_MAX_POINTS:]
+        keep = TRAJECTORY_MAX_POINTS - len(new_pts)
+        merged = (list(prev[-keep:]) if keep > 0 else []) + new_pts
         _LOGGER.debug(
             "DJI Romo /paths drain: +%d drawn pts (cursor now %d) -> trace %d pts",
             len(new_pts),
@@ -553,6 +610,7 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         """Clear the accumulated sweep trace and forget the persisted copy."""
         snapshot = replace(self.data) if self.data else RomoSnapshot()
         snapshot.trajectory = []
+        snapshot.obstacles = []
         self._paths_next_index = 0
         snapshot.last_updated = datetime.now(UTC)
         await self._store.async_remove()
@@ -560,7 +618,7 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         self.async_set_updated_data(snapshot)
 
     def property_value(self, key: str) -> Any:
-        """Return a value from the cloud properties payload by leaf key (BFS)."""
+        """Return a value from the cloud properties payload by leaf key (DFS)."""
         properties = self.data.cloud_data.get("properties", {}) if self.data else {}
         if not isinstance(properties, dict):
             return None
@@ -701,6 +759,7 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             try:
                 meta = await self.api.async_get_current_map_meta()
             except Exception:  # noqa: BLE001
+                _LOGGER.debug("DJI Romo map meta fetch failed", exc_info=True)
                 meta = None
             if meta:
                 # A new map_index (reset) or a bumped map_version (edit, e.g. a
@@ -720,8 +779,9 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             or not self._map_overlays_seeded
             or map_changed
             or (
-                snapshot.cloud_last_updated is not None
-                and (datetime.now(UTC) - snapshot.cloud_last_updated) > timedelta(hours=6)
+                self._map_overlays_fetched_at is not None
+                and (datetime.now(UTC) - self._map_overlays_fetched_at)
+                > timedelta(hours=6)
             )
         )
         if should_fetch_floor_plan:
@@ -764,8 +824,11 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
                         (map_data.get("virtual_wall") or {}).get("data") or []
                     )
                     self._map_overlays_seeded = True
+                    self._map_overlays_fetched_at = datetime.now(UTC)
             except Exception:  # noqa: BLE001
-                pass  # Non-fatal: map overlay continues working without floor plan
+                # Non-fatal: the map keeps rendering without the floor plan, but
+                # leave a trace so decode/fetch regressions are diagnosable.
+                _LOGGER.debug("DJI Romo map/overlay fetch failed", exc_info=True)
 
         # Fetch the last *completed* cleaning's report map (rooms + grid + layers +
         # the history_path sweep trace) for the "Last Cleaning" image — only when the
@@ -784,6 +847,7 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             try:
                 report_map = await self.api.async_get_job_room_map(completed_uuid)
             except Exception:  # noqa: BLE001
+                _LOGGER.debug("DJI Romo report map fetch failed", exc_info=True)
                 report_map = None
             if report_map and report_map.get("history_path"):
                 snapshot.last_clean_map = report_map
@@ -1113,25 +1177,28 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
 
     async def _async_ensure_mqtt(self) -> None:
         """Refresh MQTT credentials before expiry and maintain the connection."""
-        if self._mqtt_credentials_expired():
-            try:
-                self._mqtt_credentials = await self.api.async_get_mqtt_credentials()
-            except DjiRomoAuthError as err:
-                self._async_create_auth_repair_issue(str(err))
-                raise ConfigEntryAuthFailed(
-                    f"DJI Home authentication failed: {err}"
-                ) from err
-            except DjiRomoApiError as err:
-                raise UpdateFailed(f"Failed to obtain MQTT credentials: {err}") from err
-            self._async_delete_auth_repair_issue()
+        async with self._mqtt_connect_lock:
+            if self._mqtt_credentials_expired():
+                try:
+                    self._mqtt_credentials = await self.api.async_get_mqtt_credentials()
+                except DjiRomoAuthError as err:
+                    self._async_create_auth_repair_issue(str(err))
+                    raise ConfigEntryAuthFailed(
+                        f"DJI Home authentication failed: {err}"
+                    ) from err
+                except DjiRomoApiError as err:
+                    raise UpdateFailed(
+                        f"Failed to obtain MQTT credentials: {err}"
+                    ) from err
+                self._async_delete_auth_repair_issue()
 
-        try:
-            await self._mqtt.async_connect(
-                self._mqtt_credentials,
-                self.subscription_topics,
-            )
-        except DjiRomoMqttError as err:
-            raise UpdateFailed(f"Failed to connect to DJI Romo MQTT: {err}") from err
+            try:
+                await self._mqtt.async_connect(
+                    self._mqtt_credentials,
+                    self.subscription_topics,
+                )
+            except DjiRomoMqttError as err:
+                raise UpdateFailed(f"Failed to connect to DJI Romo MQTT: {err}") from err
 
     @callback
     def _async_check_availability(self, _now: datetime) -> None:
@@ -1154,8 +1221,9 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         if self.data is not None and self.data.last_osd_at is not None:
             silent_for = datetime.now(UTC) - self.data.last_osd_at
             if silent_for > OFFLINE_AFTER and self.data.online:
-                self.data.online = False
-                self.async_update_listeners()
+                # Publish a replaced snapshot (never mutate the stored one) so the
+                # rebase/compare logic elsewhere keeps a consistent base.
+                self.async_set_updated_data(replace(self.data, online=False))
 
         if not self._mqtt_recovering and (
             self._mqtt_down_checks >= 3 or stale_since is not None
@@ -1185,7 +1253,6 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         finally:
             self._mqtt_recovering = False
             self._mqtt_down_checks = 0
-            self._mqtt_down_checks = 0
 
     @property
     def available(self) -> bool:
@@ -1195,6 +1262,9 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
     async def _async_publish(self, payload: dict[str, Any]) -> None:
         """Publish a payload after ensuring MQTT connectivity."""
         await self._async_ensure_mqtt()
+        bid = payload.get("bid")
+        if bid:
+            self._sent_bids.append(str(bid))
         _LOGGER.debug("Publishing DJI Romo payload to %s: %s", self.command_topic, payload)
         await self._mqtt.async_publish(self.command_topic, payload)
 
@@ -1208,10 +1278,10 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
                     await self.api.async_start_clean()
                 return True
             if command_key == "pause":
-                await self.api.async_pause_cleaning(self.data.mission_bid if self.data else None)
+                await self.api.async_pause_cleaning(self._active_mission_bid())
                 return True
             if command_key == "stop":
-                await self.api.async_stop_cleaning(self.data.mission_bid if self.data else None)
+                await self.api.async_stop_cleaning(self._active_mission_bid())
                 return True
             if command_key == "return_to_base":
                 if (
@@ -1229,6 +1299,17 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             raise UpdateFailed(f"Failed to send DJI Romo command '{command_key}': {err}") from err
 
         return False
+
+    def _active_mission_bid(self) -> str | None:
+        """Return mission_bid only while a job is actually running.
+
+        The snapshot keeps the last bid after a job ends (the map/report logic
+        relies on it), so pause/stop would otherwise target a finished job.
+        Returning None lets the client look up the active job instead.
+        """
+        if self.data and self.data.activity in {"cleaning", "paused", "returning"}:
+            return self.data.mission_bid
+        return None
 
     def _async_create_auth_repair_issue(self, error: str) -> None:
         """Create a Home Assistant repair issue for expired DJI auth."""
@@ -1249,8 +1330,19 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
 
     def _handle_mqtt_message(self, topic: str, payload: Any) -> None:
         """Parse a pushed MQTT message into a snapshot."""
+        had_data = self.data is not None
         previous = self.data or RomoSnapshot()
         topic_kind = _topic_kind(topic)
+
+        # Drop the broker's echo of our own commands (see _sent_bids): parsing it
+        # would set last_osd_at/online and mark an offline robot reachable for
+        # OFFLINE_AFTER just because we sent it a command.
+        if (
+            topic_kind == "services"
+            and isinstance(payload, dict)
+            and str(payload.get("bid")) in self._sent_bids
+        ):
+            return
 
         # Health-management alerts ride on the events topic and only update the
         # alert list / fire an event; they never carry osd state, so handle them
@@ -1442,10 +1534,34 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             self._stop_paths_poll()
 
         if not _meaningful_state_changed(previous, snapshot):
+            # Nothing entities care about changed, so drop the update — but keep
+            # the liveness clock ticking on the stored snapshot: discarding the
+            # fresh last_osd_at here would let the availability check flag a
+            # chatty-but-static robot (docked, battery full) offline after
+            # OFFLINE_AFTER, then flip it back on the next meaningful message.
+            if had_data and snapshot.last_osd_at is not None:
+                previous.last_osd_at = snapshot.last_osd_at
             return
 
         snapshot.last_updated = datetime.now(UTC)
         self.async_set_updated_data(snapshot)
+
+        # A confirmed job boundary changes the REST-only picture (active_job,
+        # consumables — the cloud recalculates tank levels around a run, and
+        # settles them once the robot docks), so run one immediate poll with the
+        # static cache invalidated. Guarded to fire only on a *transition*:
+        # re-triggering per message would starve the poll exactly like the
+        # timer-rescheduling bug the dedicated tick works around.
+        if (
+            had_data
+            and previous.activity != snapshot.activity
+            and (
+                "cleaning" in (previous.activity, snapshot.activity)
+                or snapshot.activity == "docked"
+            )
+        ):
+            self._static_fetched_at = None
+            self.hass.async_create_task(self.async_refresh())
 
     def _handle_hms_event(
         self,
@@ -1459,6 +1575,11 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             alerts = []
 
         now = datetime.now(UTC)
+        if self.data is not None and previous.online and alerts == previous.hms_alerts:
+            # Nothing changed: keep the liveness clock ticking (an events message
+            # still proves the robot is reachable) without waking every entity.
+            previous.last_osd_at = now
+            return
         # An events message still proves the robot is reachable.
         snapshot = replace(previous, online=True, last_osd_at=now)
         if alerts != previous.hms_alerts:
@@ -1478,26 +1599,46 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
     ) -> None:
         """Update dock drying state/percentage/remaining time from a drying_progress event."""
         now = datetime.now(UTC)
-        snapshot = replace(previous, online=True, last_osd_at=now)
         data = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
 
         if str(data.get("status", "")).lower() == "in_progress":
-            snapshot.drying_active = True
-            stage = data.get("sub_job_status", {}).get("cur_submission")
-            snapshot.drying_stage = str(stage) if stage else None
+            active = True
+            raw_stage = data.get("sub_job_status", {}).get("cur_submission")
+            stage = str(raw_stage) if raw_stage else None
             percent = _coerce_int(data.get("progress", {}).get("percent"))
-            snapshot.drying_percent = percent
             remaining = _coerce_int(
                 data.get("duration", {}).get("estimated_remaining_duration")
             )
-            snapshot.drying_remaining_s = remaining if (remaining or 0) >= 0 else None
+            remaining = remaining if (remaining or 0) >= 0 else None
         else:
             # Drying finished or stopped: clear the live fields.
-            snapshot.drying_active = False
-            snapshot.drying_stage = None
-            snapshot.drying_percent = None
-            snapshot.drying_remaining_s = None
+            active, stage, percent, remaining = False, None, None, None
 
+        if (
+            self.data is not None
+            and previous.online
+            and (active, stage, percent, remaining)
+            == (
+                previous.drying_active,
+                previous.drying_stage,
+                previous.drying_percent,
+                previous.drying_remaining_s,
+            )
+        ):
+            # Nothing changed: keep the liveness clock ticking without waking
+            # every entity (repeated idle/no-op drying events).
+            previous.last_osd_at = now
+            return
+
+        snapshot = replace(
+            previous,
+            online=True,
+            last_osd_at=now,
+            drying_active=active,
+            drying_stage=stage,
+            drying_percent=percent,
+            drying_remaining_s=remaining,
+        )
         snapshot.last_updated = now
         self.async_set_updated_data(snapshot)
 
@@ -1634,6 +1775,32 @@ def _meaningful_state_changed(previous: RomoSnapshot, current: RomoSnapshot) -> 
     )
 
 
+def _rebase_rest_fields(
+    base: RomoSnapshot,
+    fetched: RomoSnapshot,
+    latest: RomoSnapshot,
+) -> RomoSnapshot:
+    """Rebase a REST refresh onto a snapshot that moved on during the fetch.
+
+    ``fetched`` started as a copy of ``base``; comparing the two reveals exactly
+    what the refresh changed (cloud_data, jobs, rooms, overlays — including a
+    trace wipe on a map/session reset) and only those fields are carried over to
+    ``latest``. Live-seeded fields always keep the pushed value: the seed only
+    exists for the pre-first-osd window, and here a push has clearly arrived.
+    """
+    merged = replace(latest)
+    for f in fields(RomoSnapshot):
+        if f.name in LIVE_SEEDED_FIELDS:
+            continue
+        value = getattr(fetched, f.name)
+        if value != getattr(base, f.name):
+            setattr(merged, f.name, value)
+    # Derived from activity/step (live) + rooms/jobs (REST): recompute against
+    # the merged state rather than keeping either side's stale value.
+    merged.current_room = _current_cleaning_room(merged)
+    return merged
+
+
 def _downsample(
     points: list[tuple[float, float]],
     max_points: int,
@@ -1652,21 +1819,45 @@ def _flatten_dict(
     payload: dict[str, Any],
     prefix: str = "",
 ) -> dict[str, Any]:
-    """Flatten nested dict/list payloads so heuristic matching stays simple."""
+    """Flatten nested dict/list payloads so heuristic matching stays simple.
+
+    Every full path *and every dotted suffix* of it is registered, first
+    occurrence wins — the same value the old linear scan (``key == target or
+    key.endswith(f".{target}")`` in insertion order) used to find. This makes
+    ``_pick_first`` a plain dict lookup instead of an O(keys x targets) scan,
+    which matters at ~1 osd message per second.
+    """
     flattened: dict[str, Any] = {}
+    _flatten_into(payload, prefix, flattened)
+    return flattened
+
+
+def _flatten_into(
+    payload: dict[str, Any],
+    prefix: str,
+    out: dict[str, Any],
+) -> None:
+    """Recursive worker for _flatten_dict, writing into a shared dict."""
     for key, value in payload.items():
         path = f"{prefix}.{key}" if prefix else str(key)
-        flattened[path] = value
-        flattened[str(key)] = value
+        _register_suffixes(out, path, value)
         if isinstance(value, dict):
-            flattened.update(_flatten_dict(value, path))
+            _flatten_into(value, path, out)
         elif isinstance(value, list):
             for index, item in enumerate(value):
                 item_key = f"{path}[{index}]"
-                flattened[item_key] = item
+                _register_suffixes(out, item_key, item)
                 if isinstance(item, dict):
-                    flattened.update(_flatten_dict(item, item_key))
-    return flattened
+                    _flatten_into(item, item_key, out)
+
+
+def _register_suffixes(out: dict[str, Any], path: str, value: Any) -> None:
+    """Register a value under its full path and every dotted suffix (first wins)."""
+    out.setdefault(path, value)
+    dot = path.find(".")
+    while dot != -1:
+        out.setdefault(path[dot + 1:], value)
+        dot = path.find(".", dot + 1)
 
 
 def _topic_kind(topic: str) -> str:
@@ -1681,11 +1872,15 @@ def _topic_kind(topic: str) -> str:
 
 
 def _pick_first(flattened: dict[str, Any], keys: tuple[str, ...]) -> Any:
-    """Pick a value if any flattened key ends with one of the requested names."""
+    """Pick the first present value among the requested leaf/dotted names.
+
+    ``_flatten_dict`` registers every dotted suffix of each path, so a plain
+    dict lookup here matches exactly what the old suffix scan found.
+    """
     for target in keys:
-        for key, value in flattened.items():
-            if key == target or key.endswith(f".{target}"):
-                return value
+        value = flattened.get(target)
+        if value is not None:
+            return value
     return None
 
 
@@ -1763,8 +1958,6 @@ def _yaw_degrees(pose: dict[str, Any]) -> float | None:
     qz = _coerce_float(pose.get("qz"))
     if qw is None or qz is None:
         return None
-    from math import atan2, degrees
-
     return round(degrees(2 * atan2(qz, qw)) % 360, 1)
 
 

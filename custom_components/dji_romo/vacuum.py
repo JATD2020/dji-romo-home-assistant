@@ -15,22 +15,15 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 import voluptuous as vol
 
 from .const import (
-    ATTR_LAST_TOPIC,
     ATTR_LAST_UPDATED,
     ATTR_ROOMS,
     ATTR_SELECTED_TOPIC,
-    CONF_ROOM_FAN_SPEED,
     SERVICE_CLEAN_ROOMS,
 )
 from .coordinator import DjiRomoCoordinator
 from .entity import DjiRomoCoordinatorEntity
 
 PARALLEL_UPDATES = 0
-FAN_SPEED_OPTIONS = {
-    1: "Quiet",
-    2: "Standard",
-    3: "Max",
-}
 
 
 async def async_setup_entry(
@@ -54,6 +47,9 @@ class DjiRomoVacuum(DjiRomoCoordinatorEntity, StateVacuumEntity):
     """Representation of a DJI Romo robot."""
 
     _attr_name = None
+    # No FAN_SPEED feature: the vacuum card's selector was misleading — it showed
+    # the live suction but wrote the *room-clean default*. The "Room Suction
+    # Power" select is the control; "Current Suction Power" is the live reading.
     _attr_supported_features = (
         VacuumEntityFeature.STATE
         | VacuumEntityFeature.START
@@ -62,9 +58,7 @@ class DjiRomoVacuum(DjiRomoCoordinatorEntity, StateVacuumEntity):
         | VacuumEntityFeature.RETURN_HOME
         | VacuumEntityFeature.LOCATE
         | VacuumEntityFeature.SEND_COMMAND
-        | VacuumEntityFeature.FAN_SPEED
     )
-    _attr_fan_speed_list = list(FAN_SPEED_OPTIONS.values())
 
     def __init__(self, coordinator: DjiRomoCoordinator) -> None:
         super().__init__(coordinator)
@@ -79,29 +73,15 @@ class DjiRomoVacuum(DjiRomoCoordinatorEntity, StateVacuumEntity):
             return None
 
     @property
-    def fan_speed(self) -> str | None:
-        """Return the suction mode: the robot's live value, else the room default.
-
-        ``async_set_fan_speed`` writes the room-clean option, so when the robot
-        isn't reporting a live suction we surface that configured default to keep
-        the selector in sync with what it controls.
-        """
-        value = self.coordinator.data.fan_speed
-        if value is None:
-            value = self.coordinator.room_cleaning_options[CONF_ROOM_FAN_SPEED]
-        return FAN_SPEED_OPTIONS.get(value)
-
-    @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Expose parsed state details without storing full raw MQTT payloads."""
+        # No cleaned_area here: the Current Clean Area sensor carries it, and the
+        # attribute would be rewritten to the database ~1/s during a clean.
         attrs = dict(super().extra_state_attributes)
-        if self.coordinator.data.cleaned_area is not None:
-            attrs["cleaned_area"] = self.coordinator.data.cleaned_area
         if self.coordinator.data.status_text is not None:
             attrs["status_text"] = self.coordinator.data.status_text
         if self.coordinator.data.selected_topic is not None:
             attrs[ATTR_SELECTED_TOPIC] = self.coordinator.data.selected_topic
-            attrs[ATTR_LAST_TOPIC] = self.coordinator.data.selected_topic
         if self.coordinator.data.last_updated is not None:
             attrs[ATTR_LAST_UPDATED] = self.coordinator.data.last_updated.isoformat()
         return attrs
@@ -125,16 +105,6 @@ class DjiRomoVacuum(DjiRomoCoordinatorEntity, StateVacuumEntity):
     async def async_locate(self, **kwargs: Any) -> None:
         """Make the robot announce its location."""
         await self.coordinator.async_send_named_command("locate")
-
-    async def async_set_fan_speed(self, fan_speed: str, **kwargs: Any) -> None:
-        """Set the suction power used by Home Assistant room clean buttons."""
-        for value, name in FAN_SPEED_OPTIONS.items():
-            if name == fan_speed:
-                await self.coordinator.async_set_room_cleaning_option(
-                    CONF_ROOM_FAN_SPEED,
-                    value,
-                )
-                return
 
     async def async_send_command(
         self,

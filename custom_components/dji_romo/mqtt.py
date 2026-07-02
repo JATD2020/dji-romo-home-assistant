@@ -17,7 +17,6 @@ from .client import DjiMqttCredentials
 _LOGGER = logging.getLogger(__name__)
 
 MessageCallback = Callable[[str, Any], None]
-ConnectionLostCallback = Callable[[], None]
 
 
 class DjiRomoMqttError(Exception):
@@ -31,18 +30,18 @@ class DjiRomoMqttClient:
         self,
         loop: asyncio.AbstractEventLoop,
         on_message: MessageCallback,
-        on_connection_lost: ConnectionLostCallback | None = None,
     ) -> None:
         self._loop = loop
         self._on_message = on_message
-        self._on_connection_lost = on_connection_lost
         self._client: mqtt.Client | None = None
         self._connected = asyncio.Event()
+        # Per-attempt "CONNACK arrived" signal, distinct from _connected: a refused
+        # CONNACK must wake the async_connect waiter (fail fast on e.g. expired
+        # broker credentials) without ever marking the session as connected.
+        self._connect_done = asyncio.Event()
+        self._connect_failure: str | None = None
         self._current_credentials: tuple[str, int, str, str, str] | None = None
         self._subscriptions: tuple[str, ...] = ()
-        # Set while we tear the session down on purpose, so the disconnect
-        # callback does not mistake it for a dropped connection.
-        self._closing = False
         # Timestamps used to detect a "zombie" session (socket up but no traffic).
         self._last_connect_at: datetime | None = None
         self._last_message_at: datetime | None = None
@@ -90,7 +89,8 @@ class DjiRomoMqttClient:
 
         self._client = client
         self._connected.clear()
-        self._closing = False
+        self._connect_done = asyncio.Event()
+        self._connect_failure = None
         self._subscriptions = tuple(subscriptions)
         self._current_credentials = new_credentials
 
@@ -98,7 +98,7 @@ class DjiRomoMqttClient:
         client.loop_start()
 
         try:
-            await asyncio.wait_for(self._connected.wait(), timeout=30)
+            await asyncio.wait_for(self._connect_done.wait(), timeout=30)
         except TimeoutError as err:
             # Could not authenticate against the broker in time. Tear the
             # half-open client down so the next attempt starts clean and the
@@ -107,6 +107,12 @@ class DjiRomoMqttClient:
             raise DjiRomoMqttError(
                 "Timed out establishing the DJI Romo MQTT session."
             ) from err
+        if self._connect_failure is not None:
+            # The broker refused the CONNACK (bad/expired credentials): fail fast
+            # so the caller refreshes credentials instead of burning the timeout.
+            reason = self._connect_failure
+            await self.async_disconnect()
+            raise DjiRomoMqttError(f"DJI Romo MQTT connect refused: {reason}")
 
     async def async_disconnect(self) -> None:
         """Tear down the MQTT client."""
@@ -115,7 +121,6 @@ class DjiRomoMqttClient:
 
         client = self._client
         self._client = None
-        self._closing = True
         self._connected.clear()
         self._current_credentials = None
         self._subscriptions = ()
@@ -157,7 +162,14 @@ class DjiRomoMqttClient:
                 payload=json.dumps(payload, separators=(",", ":")),
                 qos=1,
             )
-            msg_info.wait_for_publish()
+            # Bounded wait: without a timeout a broker that stops ACKing (the
+            # zombie-session case) would pin this executor thread forever and
+            # the HA service call would never return.
+            msg_info.wait_for_publish(timeout=10)
+            if not msg_info.is_published():
+                raise DjiRomoMqttError(
+                    f"Timed out publishing to DJI Romo MQTT topic {topic}."
+                )
 
         await self._loop.run_in_executor(None, _publish)
 
@@ -176,6 +188,10 @@ class DjiRomoMqttClient:
 
         if is_failure:
             _LOGGER.error("DJI Romo MQTT connect failed: %s", reason_code)
+            # Wake the async_connect waiter so it can fail fast; _connected stays
+            # clear so a refused mid-session *re*connect still reads as down.
+            self._connect_failure = str(reason_code)
+            self._loop.call_soon_threadsafe(self._connect_done.set)
             return
 
         _LOGGER.debug("DJI Romo MQTT connected")
@@ -183,6 +199,7 @@ class DjiRomoMqttClient:
         for topic in self._subscriptions:
             client.subscribe(topic, qos=1)
         self._loop.call_soon_threadsafe(self._connected.set)
+        self._loop.call_soon_threadsafe(self._connect_done.set)
 
     def _on_disconnect(
         self,
@@ -195,10 +212,6 @@ class DjiRomoMqttClient:
         """Handle MQTT disconnect callback."""
         _LOGGER.debug("DJI Romo MQTT disconnected: %s", reason_code)
         self._loop.call_soon_threadsafe(self._connected.clear)
-        # Only notify on unexpected drops; an intentional teardown is handled by
-        # async_disconnect itself.
-        if not self._closing and self._on_connection_lost is not None:
-            self._loop.call_soon_threadsafe(self._on_connection_lost)
 
     def _on_paho_message(
         self,

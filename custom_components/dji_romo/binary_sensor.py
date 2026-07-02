@@ -18,6 +18,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import DjiRomoCoordinator
 from .entity import DjiRomoCoordinatorEntity
+from .helpers import setting_value as _setting, truthy as _truthy
 
 PARALLEL_UPDATES = 0
 
@@ -27,29 +28,9 @@ class DjiRomoBinarySensorDescription(BinarySensorEntityDescription):
     """Entity description for Romo binary sensors."""
 
     value_fn: Callable[[DjiRomoCoordinator], bool | None]
+    attrs_fn: Callable[[DjiRomoCoordinator], dict[str, Any]] | None = None
     # Connectivity sensors must keep reporting while the robot is offline.
     available_when_offline: bool = False
-
-
-def _truthy(value: Any) -> bool | None:
-    """Coerce DJI's mix of bool/int flags into a tri-state boolean."""
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    return None
-
-
-def _setting(coordinator: DjiRomoCoordinator, *path: str) -> Any:
-    """Return a value from the REST settings payload by nested key path."""
-    current: Any = coordinator.data.cloud_data.get("settings", {})
-    for part in path:
-        if not isinstance(current, dict):
-            return None
-        current = current.get(part)
-    return current
 
 
 BINARY_SENSORS: tuple[DjiRomoBinarySensorDescription, ...] = (
@@ -58,6 +39,10 @@ BINARY_SENSORS: tuple[DjiRomoBinarySensorDescription, ...] = (
         name="Online",
         device_class=BinarySensorDeviceClass.CONNECTIVITY,
         entity_category=EntityCategory.DIAGNOSTIC,
+        # Duplicates HA availability (every entity already goes unavailable when
+        # the robot is offline), so new installs don't get it; existing installs
+        # keep whatever enabled state their registry has.
+        entity_registry_enabled_default=False,
         available_when_offline=True,
         value_fn=lambda coordinator: coordinator.available,
     ),
@@ -82,6 +67,9 @@ BINARY_SENSORS: tuple[DjiRomoBinarySensorDescription, ...] = (
         device_class=BinarySensorDeviceClass.PROBLEM,
         value_fn=lambda coordinator: bool(coordinator.data.hms_alerts)
         or coordinator.data.activity == "error",
+        # The active HMS alert list rides here (there is no separate alert-count
+        # sensor); the Health Alert event entity covers automation triggers.
+        attrs_fn=lambda coordinator: {"alerts": coordinator.data.hms_alerts},
     ),
     # Auto dust box drying is now a writable switch (see switch.py).
     DjiRomoBinarySensorDescription(
@@ -185,3 +173,11 @@ class DjiRomoBinarySensor(DjiRomoCoordinatorEntity, BinarySensorEntity):
     def is_on(self) -> bool | None:
         """Return the current binary state."""
         return self.entity_description.value_fn(self.coordinator)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return sensor-specific attributes."""
+        attrs = dict(super().extra_state_attributes)
+        if self.entity_description.attrs_fn is not None:
+            attrs.update(self.entity_description.attrs_fn(self.coordinator))
+        return attrs

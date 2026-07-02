@@ -77,9 +77,6 @@
       "current_mopping_speed": {
         "name": "Current Mopping Speed"
       },
-      "firmware": {
-        "name": "Firmware"
-      },
       "dock_serial": {
         "name": "Dock Serial"
       },
@@ -119,9 +116,6 @@
       "consumable_alerts": {
         "name": "Consumable Alerts"
       },
-      "active_alerts": {
-        "name": "Active Alerts"
-      },
       "last_clean_area": {
         "name": "Last Clean Area"
       },
@@ -142,9 +136,6 @@
       },
       "mapped_area": {
         "name": "Mapped Area"
-      },
-      "room_count": {
-        "name": "Room Count"
       },
       "distance_to_dock": {
         "name": "Distance to Dock"

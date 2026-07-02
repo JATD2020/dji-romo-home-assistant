@@ -17,6 +17,7 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 from .const import CONF_ROOM_CLEAN_NUM
 from .coordinator import DjiRomoCoordinator
 from .entity import DjiRomoCoordinatorEntity
+from .helpers import setting_value as _setting
 
 PARALLEL_UPDATES = 0
 
@@ -49,16 +50,6 @@ class DjiRomoSettingNumberDescription(NumberEntityDescription):
 
     value_fn: Callable[[DjiRomoCoordinator], float | None]
     param_fn: Callable[[DjiRomoCoordinator, int], dict[str, Any]]
-
-
-def _setting(coordinator: DjiRomoCoordinator, *path: str) -> Any:
-    """Return a value from the REST settings payload by nested key path."""
-    current: Any = coordinator.data.cloud_data.get("settings", {})
-    for part in path:
-        if not isinstance(current, dict):
-            return None
-        current = current.get(part)
-    return current
 
 
 SETTING_NUMBERS: tuple[DjiRomoSettingNumberDescription, ...] = (

@@ -77,9 +77,6 @@
       "current_mopping_speed": {
         "name": "Vitesse de serpillière actuelle"
       },
-      "firmware": {
-        "name": "Micrologiciel"
-      },
       "dock_serial": {
         "name": "Numéro de série de la base"
       },
@@ -119,9 +116,6 @@
       "consumable_alerts": {
         "name": "Alertes consommables"
       },
-      "active_alerts": {
-        "name": "Alertes actives"
-      },
       "last_clean_area": {
         "name": "Surface du dernier nettoyage"
       },
@@ -142,9 +136,6 @@
       },
       "mapped_area": {
         "name": "Surface cartographiée"
-      },
-      "room_count": {
-        "name": "Nombre de pièces"
       },
       "distance_to_dock": {
         "name": "Distance à la base"

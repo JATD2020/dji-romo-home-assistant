@@ -22,6 +22,7 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .coordinator import DjiRomoCoordinator
 from .entity import DjiRomoCoordinatorEntity
+from .helpers import setting_value as _setting, truthy as _truthy
 
 PARALLEL_UPDATES = 0
 
@@ -38,27 +39,6 @@ class DjiRomoSwitchDescription(SwitchEntityDescription):
 
     value_fn: Callable[[DjiRomoCoordinator], bool | None]
     param_fn: Callable[[DjiRomoCoordinator, bool], dict[str, Any]]
-
-
-def _setting(coordinator: DjiRomoCoordinator, *path: str) -> Any:
-    """Return a value from the REST settings payload by nested key path."""
-    current: Any = coordinator.data.cloud_data.get("settings", {})
-    for part in path:
-        if not isinstance(current, dict):
-            return None
-        current = current.get(part)
-    return current
-
-
-def _truthy(value: Any) -> bool | None:
-    """Coerce a 0/1 setting flag to bool, preserving None when absent."""
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    return None
 
 
 def _inverted(value: Any) -> bool | None:
