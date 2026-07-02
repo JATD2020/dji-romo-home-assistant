@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from math import hypot
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -74,6 +75,7 @@ SENSORS: tuple[DjiRomoSensorDescription, ...] = (
         name="Battery",
         native_unit_of_measurement=PERCENTAGE,
         device_class=SensorDeviceClass.BATTERY,
+        state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda coordinator: coordinator.data.battery_level,
     ),
     DjiRomoSensorDescription(
@@ -135,14 +137,8 @@ SENSORS: tuple[DjiRomoSensorDescription, ...] = (
             coordinator.data.clean_speed,
         ),
     ),
-    DjiRomoSensorDescription(
-        key="firmware",
-        name="Firmware",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: _cloud_path(
-            coordinator, "properties.device_base_info.device_version.firmware_version"
-        ),
-    ),
+    # No "firmware" sensor: the firmware version is already shown on the device
+    # page (DeviceInfo.sw_version, rebuilt on every refresh in entity.py).
     DjiRomoSensorDescription(
         key="dock_serial",
         name="Dock Serial",
@@ -290,13 +286,9 @@ SENSORS: tuple[DjiRomoSensorDescription, ...] = (
             "alerts": coordinator.data.cloud_data.get("consumable_alerts", [])
         },
     ),
-    DjiRomoSensorDescription(
-        key="active_alerts",
-        name="Active Alerts",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: len(coordinator.data.hms_alerts),
-        attrs_fn=lambda coordinator: {"alerts": coordinator.data.hms_alerts},
-    ),
+    # No "active_alerts" sensor: HMS alerts are surfaced by the Problem binary
+    # sensor (with the alert list as an attribute), the Health Alert event entity
+    # and the dji_romo_hms bus event.
     DjiRomoSensorDescription(
         key="current_room",
         name="Current Cleaning Room",
@@ -317,12 +309,7 @@ SENSORS: tuple[DjiRomoSensorDescription, ...] = (
             "areas": {r["name"]: r["area"] for r in coordinator.data.rooms},
         },
     ),
-    DjiRomoSensorDescription(
-        key="room_count",
-        name="Room Count",
-        icon="mdi:home-floor-g",
-        value_fn=lambda coordinator: len(coordinator.data.rooms) or None,
-    ),
+    # No "room_count" sensor: the count is the "rooms" attribute of Mapped Area.
     DjiRomoSensorDescription(
         key="distance_to_dock",
         name="Distance to Dock",
@@ -567,8 +554,6 @@ def _distance_to_dock(coordinator: DjiRomoCoordinator) -> float | None:
     data = coordinator.data
     if None in (data.robot_x, data.robot_y, data.dock_x, data.dock_y):
         return None
-    from math import hypot
-
     return round(hypot(data.robot_x - data.dock_x, data.robot_y - data.dock_y), 2)
 
 

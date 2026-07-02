@@ -21,20 +21,18 @@ from .rooms import room_configs_from_shortcuts, room_name
 _LOGGER = logging.getLogger(__name__)
 PARALLEL_UPDATES = 0
 
+# Names come from translations (strings.json / translations/*) via the key.
 DOCK_ACTIONS = (
     {
         "key": "dust_collect",
-        "name": "Dust Collection",
         "icon": "mdi:delete-sweep",
     },
     {
         "key": "wash_mop_pads",
-        "name": "Wash Mop Pads",
         "icon": "mdi:waves",
     },
     {
         "key": "dry_mop_pads",
-        "name": "Dry Mop Pads",
         "icon": "mdi:fan",
     },
 )
@@ -172,7 +170,8 @@ class DjiRomoDockActionButton(DjiRomoCoordinatorEntity, ButtonEntity):
     ) -> None:
         super().__init__(coordinator)
         self._action = action
-        self._attr_name = action["name"]
+        # Named via translation_key only: setting _attr_name would override the
+        # strings.json/fr.json translations.
         self._attr_translation_key = action["key"]
         self._attr_icon = action["icon"]
         self._attr_unique_id = f"{coordinator.device_sn}_{action['key']}"
@@ -202,7 +201,6 @@ class DjiRomoClearMapButton(DjiRomoCoordinatorEntity, ButtonEntity):
 
     def __init__(self, coordinator: DjiRomoCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_name = "Clear Map"
         self._attr_unique_id = f"{coordinator.device_sn}_clear_map"
 
     @property

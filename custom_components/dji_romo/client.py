@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -12,10 +13,28 @@ from typing import Any
 from uuid import uuid4
 
 from aiohttp import ClientError, ClientResponseError, ClientSession
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from .const import DEFAULT_API_URL, DEFAULT_LOCALE, DEFAULT_START_PLAN_KEYS
+from .const import (
+    DEFAULT_API_URL,
+    DEFAULT_LOCALE,
+    DEFAULT_START_PLAN_KEYS,
+    TERMINAL_JOB_STATUSES,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+# Endpoints whose responses carry secrets — the MQTT password (users/auth/token)
+# and the map decryption key (safety/info). Their payloads are never logged, even
+# at debug level: users routinely paste debug logs into GitHub issues.
+_SENSITIVE_PATH_PARTS = ("users/auth/token", "safety/info")
+
+
+def _loggable_payload(path: str, payload: dict[str, Any]) -> Any:
+    """Return the payload for debug logging, redacted for sensitive endpoints."""
+    if any(part in path for part in _SENSITIVE_PATH_PARTS):
+        return "<redacted>"
+    return payload
 
 
 class DjiRomoApiError(Exception):
@@ -56,6 +75,10 @@ class DjiRomoApiClient:
         self._device_sn = device_sn
         self._api_url = api_url.rstrip("/")
         self._locale = locale
+        # The account's map decryption key (safety/info) is stable, so cache it
+        # instead of refetching it for every map/report download. Cleared if a
+        # decrypt fails, in case the key ever rotates.
+        self._share_key: bytes | None = None
 
     async def async_get_mqtt_credentials(self) -> DjiMqttCredentials:
         """Fetch temporary MQTT credentials."""
@@ -83,8 +106,11 @@ class DjiRomoApiClient:
         """Return the device map-decryption key (AES-256-GCM) as raw bytes.
 
         The key is the ``share_encryption_key`` (32-byte hex) from ``safety/info``;
-        every encrypted map blob this account serves is decryptable with it.
+        every encrypted map blob this account serves is decryptable with it. It is
+        stable per account, so it is fetched once and cached.
         """
+        if self._share_key is not None:
+            return self._share_key
         try:
             safety_info = await self._device_request("GET", "safety/info")
         except DjiRomoApiError:
@@ -93,9 +119,10 @@ class DjiRomoApiClient:
         if not share_key_hex or len(share_key_hex) != 64:
             return None
         try:
-            return bytes.fromhex(share_key_hex)
+            self._share_key = bytes.fromhex(share_key_hex)
         except ValueError:
             return None
+        return self._share_key
 
     async def _async_download_and_decrypt_map(
         self,
@@ -121,9 +148,6 @@ class DjiRomoApiClient:
             return None
 
         try:
-            import asyncio
-
-            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
             aesgcm = AESGCM(share_key)
             loop = asyncio.get_running_loop()
             plaintext = await loop.run_in_executor(
@@ -134,7 +158,9 @@ class DjiRomoApiClient:
                 None,
             )
             return json.loads(plaintext)
-        except Exception:
+        except Exception:  # noqa: BLE001
+            # Drop the cached key so a rotated key is refetched on the next try.
+            self._share_key = None
             return None
 
     async def _async_fetch_current_map(self) -> dict[str, Any] | None:
@@ -174,32 +200,29 @@ class DjiRomoApiClient:
         """
         return await self._async_fetch_current_map()
 
-    async def async_get_job_map(self, job_uuid: str) -> dict[str, Any] | None:
-        """Fetch and decrypt a *completed job's* map snapshot.
+    async def async_get_current_map_meta(self) -> dict[str, Any] | None:
+        """Return the current map's identity/revision without downloading the blob.
 
-        This is the frozen "cleaning report" map for one job (endpoint
-        ``GET jobs/cleans/{uuid}/map``), decrypted with the same share key. It
-        carries the same layers as the live map — ``seg_map`` (room polygons),
-        ``obstacle_layer`` (detected objects/furniture, each with a photo
-        ``file_id``), ``carpet_layer``, ``restricted_layer``, ``virtual_wall`` and
-        the occupancy ``grid_map`` — but for the state at that job's completion.
-
-        Note: this map does *not* contain the sweep trace; the per-job trace lives
-        in the job's ``room_map`` file instead (see ``async_get_job_trace``).
+        Reads only the lightweight ``maps/list`` JSON and returns
+        ``{"map_index": ..., "map_version": ...}`` for the current map.
+        ``map_index`` is stable per physical map (changes on a map reset);
+        ``map_version`` bumps on every edit (e.g. deleting a no-go zone). Used to
+        decide when the cached overlays are stale and to detect a map reset.
         """
-        share_key = await self._async_get_share_key()
-        if share_key is None:
-            return None
         try:
-            payload = await self._device_request("GET", f"jobs/cleans/{job_uuid}/map")
+            maps_payload = await self._device_request("GET", "maps/list")
         except DjiRomoApiError:
             return None
-        data = payload.get("data", {})
-        return await self._async_download_and_decrypt_map(
-            data.get("file_url", ""),
-            data.get("file_header", {}),
-            share_key,
-        )
+        map_list: list[dict[str, Any]] = maps_payload.get("data", {}).get("map_list", [])
+        current_map = next((m for m in map_list if m.get("is_current")), None)
+        if not current_map:
+            current_map = map_list[0] if map_list else None
+        if not current_map:
+            return None
+        return {
+            "map_index": current_map.get("map_index"),
+            "map_version": current_map.get("map_version"),
+        }
 
     async def async_get_job_room_map(self, job_uuid: str) -> dict[str, Any] | None:
         """Fetch and decrypt a completed job's full ``room_map`` snapshot.
@@ -250,15 +273,6 @@ class DjiRomoApiClient:
             file_url, file_header, share_key
         )
 
-    async def async_get_job_trace(self, job_uuid: str) -> list[list[float]] | None:
-        """Return a completed job's robot sweep trace (``history_path`` points)."""
-        room_map_data = await self.async_get_job_room_map(job_uuid)
-        if not room_map_data:
-            return None
-        history = room_map_data.get("history_path") or {}
-        points = history.get("history_path")
-        return points if isinstance(points, list) and points else None
-
     async def async_get_homes(self) -> list[dict[str, Any]]:
         """Fetch homes and attached devices for the logged-in user."""
         payload = await self._request("/app/api/v1/homes")
@@ -299,16 +313,16 @@ class DjiRomoApiClient:
         return data.get("job_list", []), _coerce_result_code(data.get("total"))
 
     async def async_get_active_job(self) -> dict[str, Any] | None:
-        """Fetch the current or most recent cleaning job."""
+        """Fetch the current cleaning job, if one is still running.
+
+        Mirrors the coordinator's detection-by-exclusion: the *running* status
+        string is not observable while the robot is docked, so any job whose
+        status is not a known terminal one counts as active.
+        """
         for job in await self.async_get_jobs():
-            if job.get("status") in {"in_progress", "paused"}:
+            if str(job.get("status", "")).lower() not in TERMINAL_JOB_STATUSES:
                 return job
         return None
-
-    async def async_get_last_job(self) -> dict[str, Any] | None:
-        """Return the newest cleaning job regardless of status."""
-        jobs = await self.async_get_jobs(limit=1)
-        return jobs[0] if jobs else None
 
     async def async_get_shortcuts(self) -> list[dict[str, Any]]:
         """Fetch app cleaning shortcuts, including room and map metadata."""
@@ -372,14 +386,19 @@ class DjiRomoApiClient:
         return payload.get("data", {})
 
     async def async_get_consumable_notifications(self) -> list[dict[str, Any]]:
-        """Fetch consumable notifications."""
-        alerts: list[dict[str, Any]] = []
-        for notify_type in (0, 1):
-            payload = await self._device_request(
-                "GET",
-                "consumables/notifications",
-                params={"notify_type": notify_type},
+        """Fetch consumable notifications (both notify types, in parallel)."""
+        payloads = await asyncio.gather(
+            *(
+                self._device_request(
+                    "GET",
+                    "consumables/notifications",
+                    params={"notify_type": notify_type},
+                )
+                for notify_type in (0, 1)
             )
+        )
+        alerts: list[dict[str, Any]] = []
+        for payload in payloads:
             alerts.extend(payload.get("data", {}).get("list", []))
         return alerts
 
@@ -629,7 +648,12 @@ class DjiRomoApiClient:
             message = result.get("message") or "Unknown DJI Romo device API error"
             raise DjiRomoApiError(message)
 
-        _LOGGER.debug("DJI Romo device API response for %s %s: %s", method, path, payload)
+        _LOGGER.debug(
+            "DJI Romo device API response for %s %s: %s",
+            method,
+            path,
+            _loggable_payload(path, payload),
+        )
         return payload
 
     async def _request(
@@ -662,7 +686,9 @@ class DjiRomoApiClient:
                 raise DjiRomoAuthError(message)
             raise DjiRomoApiError(message)
 
-        _LOGGER.debug("DJI Home API response for %s: %s", path, payload)
+        _LOGGER.debug(
+            "DJI Home API response for %s: %s", path, _loggable_payload(path, payload)
+        )
         return payload
 
     def _headers(self, *, include_json: bool = False) -> dict[str, str]:
@@ -670,8 +696,10 @@ class DjiRomoApiClient:
         headers = {
             "x-member-token": self._user_token,
             "X-DJI-locale": self._locale,
-            "version-name": "1.5.15",
-            "User-Agent": "DJI-Home/1.5.15",
+            # Matches the DJI Home app version the API behaviour was captured
+            # from (verified live 2026-07-02: settings GET returns code 0).
+            "version-name": "1.6.0",
+            "User-Agent": "DJI-Home/1.6.0",
             "x-request-start": str(int(datetime.now(UTC).timestamp() * 1000)),
         }
         if include_json:

@@ -47,8 +47,3 @@ async def async_unload_entry(hass: HomeAssistant, entry: DjiRomoConfigEntry) -> 
     if unload_ok:
         await entry.runtime_data.async_shutdown()
     return unload_ok
-
-
-async def async_reload_entry(hass: HomeAssistant, entry: DjiRomoConfigEntry) -> None:
-    """Reload the config entry."""
-    await hass.config_entries.async_reload(entry.entry_id)

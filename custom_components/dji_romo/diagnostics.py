@@ -24,6 +24,11 @@ TO_REDACT = {
     "maintain_url",
     "x-amz-server-side-encryption-customer-key",
     "x-amz-server-side-encryption-customer-key-MD5",
+    # Serial numbers: diagnostics get pasted into public GitHub issues.
+    "sn",
+    "device_sn",
+    "dock_sn",
+    "serial_number",
 }
 
 

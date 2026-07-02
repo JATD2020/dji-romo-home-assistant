@@ -39,7 +39,6 @@ class DjiRomoHmsEvent(DjiRomoCoordinatorEntity, EventEntity):
 
     def __init__(self, coordinator: DjiRomoCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_name = "Health Alert"
         self._attr_unique_id = f"{coordinator.device_sn}_hms"
         self._previous_alerts: list[dict[str, Any]] = list(coordinator.data.hms_alerts)
 

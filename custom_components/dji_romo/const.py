@@ -29,6 +29,11 @@ DEFAULT_SUBSCRIPTION_TOPICS = [
     "forward/cr800/thing/product/{device_sn}/#",
     "thing/product/{device_sn}/#",
 ]
+# MQTT method mapping for logical commands. NOTE: start/pause/stop/
+# return_to_base are normally handled over REST first (see the coordinator's
+# _async_send_rest_command, which always claims them), so in practice only
+# "locate" is published through this mapping; the other entries are kept as
+# documentation of the robot's MQTT method names and for custom mappings.
 DEFAULT_COMMAND_MAPPING = {
     "start": {"method": "start_clean"},
     "pause": {"method": "pause_clean"},
@@ -37,6 +42,29 @@ DEFAULT_COMMAND_MAPPING = {
     "locate": {"method": "find_robot"},
 }
 DEFAULT_COMMAND_MAPPING_JSON = json.dumps(DEFAULT_COMMAND_MAPPING, indent=2, sort_keys=True)
+
+# Job statuses that mean the job is finished (verified live: DJI returns "ok" for
+# a successful run and "canceled" for an aborted one). Anything not in this set is
+# treated as an active job. We avoid hard-coding the *running* status string since
+# it is not observable while the robot is docked.
+TERMINAL_JOB_STATUSES = frozenset(
+    {
+        "ok",
+        "canceled",
+        "cancelled",
+        "completed",
+        "complete",
+        "failed",
+        "fail",
+        "error",
+        "stopped",
+        "stop",
+        "timeout",
+        "interrupted",
+        "abort",
+        "aborted",
+    }
+)
 
 # plan_name_key values DJI ships for the built-in cleaning programs. These are
 # stable across locales (the human-readable plan_name is localized, often to
@@ -101,16 +129,25 @@ TRAJECTORY_MAX_POINTS = 80000
 TRAJECTORY_STORAGE_POINTS = 8000
 TRAJECTORY_SAVE_DELAY = 30  # seconds; debounced disk writes
 
+# history_path / live paths point types (column 4) that are actual *cleaning*
+# passes and get drawn as the sweep trace: 80 (main boustrophedon sweep),
+# 48 (room-perimeter pass) and 112 (edge detail). The other observed types are
+# inter-room transit (32/128) or in-room navigation / obstacle maneuvering
+# (96/64), which the DJI app does not trace either.
+CLEAN_PASS_TYPES = frozenset({48, 80, 112})
+
 # Home Assistant service to clean several named rooms in one job.
 SERVICE_CLEAN_ROOMS = "clean_rooms"
 ATTR_ROOMS = "rooms"
+# Cadence of the dedicated REST poll timer (the coordinator's own
+# update_interval is None — see the constructor note in coordinator.py).
 COORDINATOR_REFRESH_INTERVAL = timedelta(minutes=5)
-# While the robot is actively cleaning we poll faster so the "current room"
-# sensor tracks the plan instead of waiting for the slow diagnostic refresh.
-CLEANING_REFRESH_INTERVAL = timedelta(seconds=60)
-# Settings/consumables/shortcuts barely change, so during the fast cleaning poll
-# we only refetch them this often instead of on every cycle.
-STATIC_REFRESH_INTERVAL = timedelta(minutes=5)
+# Settings/consumables/shortcuts barely change, so the poll only refetches them
+# this often instead of on every cycle. Deliberately much longer than the REST
+# poll interval (equal values made the cache expire on nearly every poll);
+# job-boundary refreshes invalidate it anyway when it matters, and settings
+# writes patch it optimistically.
+STATIC_REFRESH_INTERVAL = timedelta(minutes=30)
 MQTT_CREDENTIAL_REFRESH_MARGIN = timedelta(minutes=15)
 # Fallback lifetime used only if the cloud stops returning an explicit expiry.
 MQTT_CREDENTIAL_ASSUMED_LIFETIME = timedelta(hours=4)
@@ -132,7 +169,6 @@ CLOUD_REFRESH_FAILURE_LIMIT = 3
 # alert, so automations can notify the user that the robot needs attention.
 EVENT_HMS = f"{DOMAIN}_hms"
 
-ATTR_LAST_TOPIC = "last_topic"
 ATTR_LAST_UPDATED = "last_updated"
 ATTR_MODEL = "model"
 ATTR_RAW_STATE = "raw_state"
