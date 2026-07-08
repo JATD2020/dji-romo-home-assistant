@@ -28,12 +28,13 @@ from .coordinator import DjiRomoCoordinator
 from .entity import DjiRomoCoordinatorEntity
 
 PARALLEL_UPDATES = 0
+# Verified live 2026-07-08: 4 is "Vacuum then Mop" (not "Super clean"); 0 is
+# not a valid mode.
 CLEAN_MODE_LABELS = {
-    0: "Vacuum then Mop",
     1: "Vacuum and Mop",
     2: "Vacuum Only",
     3: "Mop Only",
-    4: "Super clean",
+    4: "Vacuum then Mop",
 }
 FAN_SPEED_LABELS = {
     1: "Quiet",
@@ -45,11 +46,12 @@ WATER_LEVEL_LABELS = {
     2: "Medium",
     3: "High",
 }
+# clean_speed is the DJI app's "Route" setting (path fineness); it applies to
+# vacuum-only cleans too. Verified live 2026-07-08.
 CLEAN_SPEED_LABELS = {
-    0: "Not Applicable",
-    1: "Slow",
-    2: "Standard",
-    3: "Fast",
+    0: "Standard",
+    1: "Fast",
+    2: "Fine",
 }
 DRYING_STAGE_LABELS = {
     "drying_box": "Drying Dust Box",
@@ -123,12 +125,10 @@ SENSORS: tuple[DjiRomoSensorDescription, ...] = (
     ),
     DjiRomoSensorDescription(
         key="current_mopping_speed",
-        name="Current Mopping Speed",
-        value_fn=lambda coordinator: _mode_aware_label(
-            coordinator,
+        name="Current Route",
+        value_fn=lambda coordinator: _label(
             coordinator.data.clean_speed,
             CLEAN_SPEED_LABELS,
-            (2,),  # Vacuum Only
         ),
         attrs_fn=lambda coordinator: _raw_value_attr(
             "clean_speed",

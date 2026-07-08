@@ -38,12 +38,15 @@ SELECTS: tuple[DjiRomoSelectDescription, ...] = (
         key=CONF_ROOM_CLEAN_MODE,
         name="Room Cleaning Mode",
         icon="mdi:robot-vacuum",
+        # Values verified live 2026-07-08 against DJI app plans + test jobs:
+        # 1=Vacuum and Mop, 2=Vacuum Only, 3=Mop Only, 4=Vacuum then Mop.
+        # 0 is NOT a valid mode - the robot aborts the job during autocheck
+        # with HMS 238a0e33 ("device system error").
         option_map={
-            "Vacuum then Mop": 0,
+            "Vacuum then Mop": 4,
             "Vacuum and Mop": 1,
             "Vacuum Only": 2,
             "Mop Only": 3,
-            "Super clean": 4,
         },
     ),
     DjiRomoSelectDescription(
@@ -68,12 +71,15 @@ SELECTS: tuple[DjiRomoSelectDescription, ...] = (
     ),
     DjiRomoSelectDescription(
         key=CONF_ROOM_CLEAN_SPEED,
-        name="Room Mopping Speed",
-        icon="mdi:speedometer",
+        # clean_speed is the DJI app's "Route" setting (path fineness), not a
+        # mopping speed, and it applies to vacuum-only cleans too. Values
+        # verified live 2026-07-08: 0=Standard, 1=Fast, 2=Fine.
+        name="Room Route",
+        icon="mdi:routes",
         option_map={
-            "Slow": 1,
-            "Standard": 2,
-            "Fast": 3,
+            "Standard": 0,
+            "Fast": 1,
+            "Fine": 2,
         },
     ),
 )

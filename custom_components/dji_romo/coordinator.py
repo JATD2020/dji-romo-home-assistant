@@ -91,7 +91,7 @@ DEFAULT_ROOM_CLEANING_OPTIONS = {
     CONF_ROOM_FAN_SPEED: 3,
     CONF_ROOM_WATER_LEVEL: 2,
     CONF_ROOM_CLEAN_NUM: 1,
-    CONF_ROOM_CLEAN_SPEED: 2,
+    CONF_ROOM_CLEAN_SPEED: 0,
 }
 MEANINGFUL_STATE_KEYS = (
     "battery_level",
@@ -775,11 +775,9 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
         config["fan_speed"] = options[CONF_ROOM_FAN_SPEED]
         config["water_level"] = options[CONF_ROOM_WATER_LEVEL]
         config["clean_num"] = options[CONF_ROOM_CLEAN_NUM]
-        config["clean_speed"] = (
-            0
-            if options[CONF_ROOM_CLEAN_MODE] == 2
-            else options[CONF_ROOM_CLEAN_SPEED]
-        )
+        # clean_speed is the route (path fineness) and is valid for every
+        # clean mode, including Vacuum Only.
+        config["clean_speed"] = options[CONF_ROOM_CLEAN_SPEED]
         config["secondary_clean_num"] = base_config.get("secondary_clean_num", 1)
         config["floor_cleaner_type"] = base_config.get("floor_cleaner_type", 0)
         config["repeat_mop"] = base_config.get("repeat_mop", False)
