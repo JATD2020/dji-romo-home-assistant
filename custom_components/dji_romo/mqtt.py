@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
 import json
 import logging
 import ssl
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import paho.mqtt.client as mqtt
@@ -17,11 +17,14 @@ from .client import DjiMqttCredentials
 _LOGGER = logging.getLogger(__name__)
 
 MessageCallback = Callable[[str, Any], None]
-ConnectionLostCallback = Callable[[], None]
 
 
 class DjiRomoMqttError(Exception):
     """Raised when the MQTT session cannot be established."""
+
+
+class DjiRomoMqttAuthError(DjiRomoMqttError):
+    """Raised when the broker rejects temporary MQTT credentials."""
 
 
 class DjiRomoMqttClient:
@@ -31,18 +34,16 @@ class DjiRomoMqttClient:
         self,
         loop: asyncio.AbstractEventLoop,
         on_message: MessageCallback,
-        on_connection_lost: ConnectionLostCallback | None = None,
     ) -> None:
         self._loop = loop
         self._on_message = on_message
-        self._on_connection_lost = on_connection_lost
         self._client: mqtt.Client | None = None
         self._connected = asyncio.Event()
+        self._connect_done = asyncio.Event()
+        self._connect_failure: str | None = None
+        self._connect_auth_failure = False
         self._current_credentials: tuple[str, int, str, str, str] | None = None
         self._subscriptions: tuple[str, ...] = ()
-        # Set while we tear the session down on purpose, so the disconnect
-        # callback does not mistake it for a dropped connection.
-        self._closing = False
         # Timestamps used to detect a "zombie" session (socket up but no traffic).
         self._last_connect_at: datetime | None = None
         self._last_message_at: datetime | None = None
@@ -90,15 +91,22 @@ class DjiRomoMqttClient:
 
         self._client = client
         self._connected.clear()
-        self._closing = False
+        self._connect_done = asyncio.Event()
+        self._connect_failure = None
+        self._connect_auth_failure = False
         self._subscriptions = tuple(subscriptions)
         self._current_credentials = new_credentials
 
         client.connect_async(credentials.domain, credentials.port, keepalive=60)
-        client.loop_start()
+        result = client.loop_start()
+        if result != mqtt.MQTT_ERR_SUCCESS:
+            await self.async_disconnect()
+            raise DjiRomoMqttError(
+                f"Failed to start DJI Romo MQTT network loop: {mqtt.error_string(result)}"
+            )
 
         try:
-            await asyncio.wait_for(self._connected.wait(), timeout=30)
+            await asyncio.wait_for(self._connect_done.wait(), timeout=30)
         except TimeoutError as err:
             # Could not authenticate against the broker in time. Tear the
             # half-open client down so the next attempt starts clean and the
@@ -107,6 +115,12 @@ class DjiRomoMqttClient:
             raise DjiRomoMqttError(
                 "Timed out establishing the DJI Romo MQTT session."
             ) from err
+        if self._connect_failure is not None:
+            reason = self._connect_failure
+            auth_failure = self._connect_auth_failure
+            await self.async_disconnect()
+            error_type = DjiRomoMqttAuthError if auth_failure else DjiRomoMqttError
+            raise error_type(f"DJI Romo MQTT connect refused: {reason}")
 
     async def async_disconnect(self) -> None:
         """Tear down the MQTT client."""
@@ -115,7 +129,6 @@ class DjiRomoMqttClient:
 
         client = self._client
         self._client = None
-        self._closing = True
         self._connected.clear()
         self._current_credentials = None
         self._subscriptions = ()
@@ -148,16 +161,28 @@ class DjiRomoMqttClient:
 
     async def async_publish(self, topic: str, payload: dict[str, Any]) -> None:
         """Publish a command payload."""
-        if self._client is None or not self._connected.is_set():
-            raise RuntimeError("DJI Romo MQTT session is not connected.")
+        client = self._client
+        if client is None or not self._connected.is_set():
+            raise DjiRomoMqttError("DJI Romo MQTT session is not connected.")
 
         def _publish() -> None:
-            msg_info = self._client.publish(  # type: ignore[union-attr]
+            msg_info = client.publish(
                 topic,
                 payload=json.dumps(payload, separators=(",", ":")),
                 qos=1,
             )
-            msg_info.wait_for_publish()
+            if msg_info.rc != mqtt.MQTT_ERR_SUCCESS:
+                raise DjiRomoMqttError(
+                    f"Failed to publish DJI Romo MQTT command: {mqtt.error_string(msg_info.rc)}"
+                )
+            try:
+                msg_info.wait_for_publish(timeout=10)
+            except RuntimeError as err:
+                raise DjiRomoMqttError(
+                    "DJI Romo MQTT disconnected while publishing a command."
+                ) from err
+            if not msg_info.is_published():
+                raise DjiRomoMqttError("Timed out publishing a DJI Romo MQTT command.")
 
         await self._loop.run_in_executor(None, _publish)
 
@@ -176,6 +201,14 @@ class DjiRomoMqttClient:
 
         if is_failure:
             _LOGGER.error("DJI Romo MQTT connect failed: %s", reason_code)
+            reason = str(reason_code)
+            normalized = reason.casefold()
+            self._connect_failure = reason
+            self._connect_auth_failure = any(
+                marker in normalized
+                for marker in ("authoriz", "credential", "bad user", "password")
+            ) or getattr(reason_code, "value", None) in {5, 134, 135}
+            self._loop.call_soon_threadsafe(self._connect_done.set)
             return
 
         _LOGGER.debug("DJI Romo MQTT connected")
@@ -183,6 +216,7 @@ class DjiRomoMqttClient:
         for topic in self._subscriptions:
             client.subscribe(topic, qos=1)
         self._loop.call_soon_threadsafe(self._connected.set)
+        self._loop.call_soon_threadsafe(self._connect_done.set)
 
     def _on_disconnect(
         self,
@@ -195,10 +229,6 @@ class DjiRomoMqttClient:
         """Handle MQTT disconnect callback."""
         _LOGGER.debug("DJI Romo MQTT disconnected: %s", reason_code)
         self._loop.call_soon_threadsafe(self._connected.clear)
-        # Only notify on unexpected drops; an intentional teardown is handled by
-        # async_disconnect itself.
-        if not self._closing and self._on_connection_lost is not None:
-            self._loop.call_soon_threadsafe(self._on_connection_lost)
 
     def _on_paho_message(
         self,

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
 
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
@@ -14,10 +13,11 @@ from homeassistant.components.binary_sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from .compat import AddConfigEntryEntitiesCallback
 from .coordinator import DjiRomoCoordinator
 from .entity import DjiRomoCoordinatorEntity
+from .helpers import setting_value, truthy
 
 PARALLEL_UPDATES = 0
 
@@ -29,27 +29,6 @@ class DjiRomoBinarySensorDescription(BinarySensorEntityDescription):
     value_fn: Callable[[DjiRomoCoordinator], bool | None]
     # Connectivity sensors must keep reporting while the robot is offline.
     available_when_offline: bool = False
-
-
-def _truthy(value: Any) -> bool | None:
-    """Coerce DJI's mix of bool/int flags into a tri-state boolean."""
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    return None
-
-
-def _setting(coordinator: DjiRomoCoordinator, *path: str) -> Any:
-    """Return a value from the REST settings payload by nested key path."""
-    current: Any = coordinator.data.cloud_data.get("settings", {})
-    for part in path:
-        if not isinstance(current, dict):
-            return None
-        current = current.get(part)
-    return current
 
 
 BINARY_SENSORS: tuple[DjiRomoBinarySensorDescription, ...] = (
@@ -66,13 +45,13 @@ BINARY_SENSORS: tuple[DjiRomoBinarySensorDescription, ...] = (
         name="Charging",
         device_class=BinarySensorDeviceClass.BATTERY_CHARGING,
         # Live from the device_osd stream (~1 s); seeded from REST before first osd.
-        value_fn=lambda coordinator: _truthy(coordinator.data.charger_connected),
+        value_fn=lambda coordinator: truthy(coordinator.data.charger_connected),
     ),
     DjiRomoBinarySensorDescription(
         key="dust_bag_installed",
         name="Dust Bag Installed",
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: _truthy(
+        value_fn=lambda coordinator: truthy(
             coordinator.property_value("dust_bag_install")
         ),
     ),
@@ -80,8 +59,9 @@ BINARY_SENSORS: tuple[DjiRomoBinarySensorDescription, ...] = (
         key="problem",
         name="Problem",
         device_class=BinarySensorDeviceClass.PROBLEM,
-        value_fn=lambda coordinator: bool(coordinator.data.hms_alerts)
-        or coordinator.data.activity == "error",
+        value_fn=lambda coordinator: (
+            bool(coordinator.data.hms_alerts) or coordinator.data.activity == "error"
+        ),
     ),
     # Auto dust box drying is now a writable switch (see switch.py).
     DjiRomoBinarySensorDescription(
@@ -90,7 +70,7 @@ BINARY_SENSORS: tuple[DjiRomoBinarySensorDescription, ...] = (
         device_class=BinarySensorDeviceClass.LIGHT,
         entity_category=EntityCategory.DIAGNOSTIC,
         # Live lamp state (osd, ~1 s): only on during the dust box drying cycle.
-        value_fn=lambda coordinator: _truthy(coordinator.data.dust_bag_uv_enable),
+        value_fn=lambda coordinator: truthy(coordinator.data.dust_bag_uv_enable),
     ),
     # Battery care, child lock and Do-Not-Disturb are now writable switches
     # (see switch.py), no longer read-only sensors.
@@ -101,29 +81,29 @@ BINARY_SENSORS: tuple[DjiRomoBinarySensorDescription, ...] = (
         key="pet_care",
         name="Pet Care",
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: _truthy(_setting(coordinator, "is_pet_care")),
+        value_fn=lambda coordinator: truthy(setting_value(coordinator, "is_pet_care")),
     ),
     # AI obstacle recognition is now a writable switch (see switch.py).
     DjiRomoBinarySensorDescription(
         key="auto_mop_wash",
         name="Auto Mop Wash",
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: _truthy(_setting(coordinator, "auto_wash")),
+        value_fn=lambda coordinator: truthy(setting_value(coordinator, "auto_wash")),
     ),
     DjiRomoBinarySensorDescription(
         key="mop_ozone_deodorizer",
         name="Mop Ozone Deodorizer",
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: _truthy(
-            _setting(coordinator, "mop_ozone_deodorizer")
+        value_fn=lambda coordinator: truthy(
+            setting_value(coordinator, "mop_ozone_deodorizer")
         ),
     ),
     DjiRomoBinarySensorDescription(
         key="mop_deodorizer",
         name="Mop Deodorizer",
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: _truthy(
-            _setting(coordinator, "deodorizer_mop", "mode")
+        value_fn=lambda coordinator: truthy(
+            setting_value(coordinator, "deodorizer_mop", "mode")
         ),
     ),
     # Enhanced particle cleaning is now a writable switch (see switch.py).
@@ -131,16 +111,16 @@ BINARY_SENSORS: tuple[DjiRomoBinarySensorDescription, ...] = (
         key="enhanced_stain_cleaning",
         name="Enhanced Stain Cleaning",
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: _truthy(
-            _setting(coordinator, "enhance_stain_clean")
+        value_fn=lambda coordinator: truthy(
+            setting_value(coordinator, "enhance_stain_clean")
         ),
     ),
     DjiRomoBinarySensorDescription(
         key="status_light",
         name="Status Light",
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda coordinator: _truthy(
-            _setting(coordinator, "instruct_light_status")
+        value_fn=lambda coordinator: truthy(
+            setting_value(coordinator, "instruct_light_status")
         ),
     ),
 )
@@ -154,8 +134,7 @@ async def async_setup_entry(
     """Set up Romo binary sensors."""
     coordinator = entry.runtime_data
     async_add_entities(
-        DjiRomoBinarySensor(coordinator, description)
-        for description in BINARY_SENSORS
+        DjiRomoBinarySensor(coordinator, description) for description in BINARY_SENSORS
     )
 
 

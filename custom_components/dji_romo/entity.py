@@ -25,8 +25,6 @@ class DjiRomoCoordinatorEntity(CoordinatorEntity[DjiRomoCoordinator]):
             name=self.coordinator.device_name,
             serial_number=self.coordinator.device_sn,
             sw_version=payload.get("firmware"),
-            suggested_area=payload.get("home_name"),
-            configuration_url="https://home-api-vg.djigate.com/",
         )
 
     @property

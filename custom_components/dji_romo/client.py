@@ -2,20 +2,34 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 import json
 import logging
 import struct
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from aiohttp import ClientError, ClientResponseError, ClientSession
+from aiohttp import (
+    ClientError,
+    ClientResponse,
+    ClientResponseError,
+    ClientSession,
+    ClientTimeout,
+)
 
-from .const import DEFAULT_API_URL, DEFAULT_LOCALE, DEFAULT_START_PLAN_KEYS
+from .const import (
+    DEFAULT_API_URL,
+    DEFAULT_LOCALE,
+    DEFAULT_START_PLAN_KEYS,
+    TERMINAL_JOB_STATUSES,
+)
 
 _LOGGER = logging.getLogger(__name__)
+_API_TIMEOUT = ClientTimeout(total=20)
+_MAP_TIMEOUT = ClientTimeout(total=60)
 
 
 class DjiRomoApiError(Exception):
@@ -56,6 +70,7 @@ class DjiRomoApiClient:
         self._device_sn = device_sn
         self._api_url = api_url.rstrip("/")
         self._locale = locale
+        self._share_key: bytes | None = None
 
     async def async_get_mqtt_credentials(self) -> DjiMqttCredentials:
         """Fetch temporary MQTT credentials."""
@@ -63,21 +78,28 @@ class DjiRomoApiClient:
             "/app/api/v1/users/auth/token",
             params={"reason": "mqtt"},
         )
-        data = payload["data"]
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise DjiRomoApiError("DJI Home returned invalid MQTT credentials.")
         fetched_at = datetime.now(UTC)
         expires_at: datetime | None = None
         expire_seconds = _coerce_result_code(data.get("expire"))
         if expire_seconds and expire_seconds > 0:
             expires_at = fetched_at + timedelta(seconds=expire_seconds)
-        return DjiMqttCredentials(
-            domain=data["mqtt_domain"],
-            port=int(data["mqtt_port"]),
-            client_id=data["client_id"],
-            username=data["user_uuid"],
-            password=data["user_token"],
-            fetched_at=fetched_at,
-            expires_at=expires_at,
-        )
+        try:
+            return DjiMqttCredentials(
+                domain=str(data["mqtt_domain"]),
+                port=int(data["mqtt_port"]),
+                client_id=str(data["client_id"]),
+                username=str(data["user_uuid"]),
+                password=str(data["user_token"]),
+                fetched_at=fetched_at,
+                expires_at=expires_at,
+            )
+        except (KeyError, TypeError, ValueError) as err:
+            raise DjiRomoApiError(
+                "DJI Home returned incomplete MQTT credentials."
+            ) from err
 
     async def _async_get_share_key(self) -> bytes | None:
         """Return the device map-decryption key (AES-256-GCM) as raw bytes.
@@ -85,17 +107,21 @@ class DjiRomoApiClient:
         The key is the ``share_encryption_key`` (32-byte hex) from ``safety/info``;
         every encrypted map blob this account serves is decryptable with it.
         """
+        if self._share_key is not None:
+            return self._share_key
         try:
             safety_info = await self._device_request("GET", "safety/info")
         except DjiRomoApiError:
             return None
-        share_key_hex: str = safety_info.get("data", {}).get("share_encryption_key", "")
-        if not share_key_hex or len(share_key_hex) != 64:
+        safety_data = _object(safety_info.get("data"))
+        share_key_hex = safety_data.get("share_encryption_key", "")
+        if not isinstance(share_key_hex, str) or len(share_key_hex) != 64:
             return None
         try:
-            return bytes.fromhex(share_key_hex)
+            self._share_key = bytes.fromhex(share_key_hex)
         except ValueError:
             return None
+        return self._share_key
 
     async def _async_download_and_decrypt_map(
         self,
@@ -108,33 +134,47 @@ class DjiRomoApiClient:
         The blob is ``nonce(16) || ciphertext || tag``; the SSE-C ``file_header``
         is sent as request headers so S3 returns the (still app-encrypted) bytes.
         """
-        if not file_url:
+        if not isinstance(file_url, str) or not file_url:
             return None
+        headers = (
+            {str(key): str(value) for key, value in file_header.items()}
+            if isinstance(file_header, dict)
+            else {}
+        )
         try:
             async with self._session.get(
                 file_url,
-                headers=dict(file_header),
+                headers=headers,
                 raise_for_status=True,
+                timeout=_MAP_TIMEOUT,
             ) as resp:
                 encrypted_bytes = await resp.read()
-        except ClientError:
+        except ClientResponseError as err:
+            _LOGGER.debug("DJI Romo map download failed with HTTP %s", err.status)
+            return None
+        except (ClientError, TimeoutError) as err:
+            _LOGGER.debug("DJI Romo map download failed (%s)", type(err).__name__)
             return None
 
         try:
-            import asyncio
-
             from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-            aesgcm = AESGCM(share_key)
-            loop = asyncio.get_running_loop()
-            plaintext = await loop.run_in_executor(
-                None,
-                aesgcm.decrypt,
-                encrypted_bytes[:16],
-                encrypted_bytes[16:],
-                None,
-            )
-            return json.loads(plaintext)
-        except Exception:
+
+            if len(encrypted_bytes) < 32:
+                raise ValueError("Encrypted map payload is too short")
+
+            def _decrypt() -> dict[str, Any]:
+                plaintext = AESGCM(share_key).decrypt(
+                    encrypted_bytes[:16], encrypted_bytes[16:], None
+                )
+                decoded = json.loads(plaintext)
+                if not isinstance(decoded, dict):
+                    raise ValueError("Decrypted map is not a JSON object")
+                return decoded
+
+            return await asyncio.to_thread(_decrypt)
+        except Exception:  # noqa: BLE001
+            self._share_key = None
+            _LOGGER.debug("DJI Romo map decryption failed", exc_info=True)
             return None
 
     async def _async_fetch_current_map(self) -> dict[str, Any] | None:
@@ -152,20 +192,27 @@ class DjiRomoApiClient:
 
         try:
             maps_payload = await self._device_request("GET", "maps/list")
-            map_list: list[dict[str, Any]] = maps_payload.get("data", {}).get("map_list", [])
-            current_map = next((m for m in map_list if m.get("is_current")), None)
+            map_list = _dict_list(_object(maps_payload.get("data")).get("map_list"))
+            current_map = next(
+                (item for item in map_list if item.get("is_current")),
+                None,
+            )
             if not current_map:
-                current_map = map_list[0] if map_list else None
+                current_map = next(iter(map_list), None)
             if not current_map:
                 return None
         except DjiRomoApiError:
             return None
 
-        return await self._async_download_and_decrypt_map(
+        map_data = await self._async_download_and_decrypt_map(
             current_map.get("file_url", ""),
             current_map.get("file_header", {}),
             share_key,
         )
+        if map_data:
+            map_data.setdefault("map_index", current_map.get("map_index"))
+            map_data.setdefault("map_version", current_map.get("map_version"))
+        return map_data
 
     async def async_get_map_data(self) -> dict[str, Any] | None:
         """Fetch and decrypt the full map data.
@@ -173,6 +220,26 @@ class DjiRomoApiClient:
         Returns the full decrypted map dictionary.
         """
         return await self._async_fetch_current_map()
+
+    async def async_get_current_map_meta(self) -> dict[str, Any] | None:
+        """Return the current map identity and revision without downloading it."""
+        try:
+            maps_payload = await self._device_request("GET", "maps/list")
+        except DjiRomoApiError:
+            return None
+        map_list = _dict_list(_object(maps_payload.get("data")).get("map_list"))
+        current_map = next(
+            (item for item in map_list if item.get("is_current")),
+            None,
+        )
+        if current_map is None:
+            current_map = next(iter(map_list), None)
+        if not isinstance(current_map, dict):
+            return None
+        return {
+            "map_index": current_map.get("map_index"),
+            "map_version": current_map.get("map_version"),
+        }
 
     async def async_get_job_map(self, job_uuid: str) -> dict[str, Any] | None:
         """Fetch and decrypt a *completed job's* map snapshot.
@@ -194,7 +261,7 @@ class DjiRomoApiClient:
             payload = await self._device_request("GET", f"jobs/cleans/{job_uuid}/map")
         except DjiRomoApiError:
             return None
-        data = payload.get("data", {})
+        data = _object(payload.get("data"))
         return await self._async_download_and_decrypt_map(
             data.get("file_url", ""),
             data.get("file_header", {}),
@@ -225,7 +292,7 @@ class DjiRomoApiClient:
             job = await self._device_request("GET", f"jobs/cleans/{job_uuid}")
         except DjiRomoApiError:
             return None
-        room_map = job.get("data", {}).get("room_map", {})
+        room_map = _object(_object(job.get("data")).get("room_map"))
         file_id = room_map.get("file_id")
         if not file_id:
             return None
@@ -240,7 +307,7 @@ class DjiRomoApiClient:
                 )
             except DjiRomoApiError:
                 return None
-            data = resolved.get("data") or {}
+            data = _object(resolved.get("data"))
             file_url = data.get("file_url", "")
             file_header = data.get("file_header", {})
         if not file_url:
@@ -262,7 +329,7 @@ class DjiRomoApiClient:
     async def async_get_homes(self) -> list[dict[str, Any]]:
         """Fetch homes and attached devices for the logged-in user."""
         payload = await self._request("/app/api/v1/homes")
-        return payload.get("data", {}).get("homes", [])
+        return _dict_list(_object(payload.get("data")).get("homes"))
 
     async def async_get_live_paths(
         self, bid: str, start_index: int
@@ -295,13 +362,18 @@ class DjiRomoApiClient:
             "jobs/cleans/job/list",
             params={"offset": 0, "limit": limit},
         )
-        data = payload.get("data", {})
-        return data.get("job_list", []), _coerce_result_code(data.get("total"))
+        data = _object(payload.get("data"))
+        return _dict_list(data.get("job_list")), _coerce_result_code(data.get("total"))
+
+    async def async_get_cleaning_statistics(self) -> dict[str, Any]:
+        """Fetch lifetime cleaning totals from DJI's statistics endpoint."""
+        payload = await self._device_request("GET", "jobs/cleans/statistic")
+        return _object(payload.get("data"))
 
     async def async_get_active_job(self) -> dict[str, Any] | None:
-        """Fetch the current or most recent cleaning job."""
+        """Fetch the current cleaning job, if one is still running."""
         for job in await self.async_get_jobs():
-            if job.get("status") in {"in_progress", "paused"}:
+            if str(job.get("status", "")).lower() not in TERMINAL_JOB_STATUSES:
                 return job
         return None
 
@@ -317,17 +389,17 @@ class DjiRomoApiClient:
             "shortcuts/list",
             params={"plan_data_version": 0, "slot_id": 0},
         )
-        return payload.get("data", {}).get("plan_list", [])
+        return _dict_list(_object(payload.get("data")).get("plan_list"))
 
     async def async_get_properties(self) -> dict[str, Any]:
         """Fetch device and dock properties."""
         payload = await self._device_request("GET", "things/properties")
-        return payload.get("data", {})
+        return _object(payload.get("data"))
 
     async def async_get_settings(self) -> dict[str, Any]:
         """Fetch device settings."""
         payload = await self._device_request("GET", "settings")
-        return payload.get("data", {})
+        return _object(payload.get("data"))
 
     async def async_set_settings(self, param: dict[str, Any]) -> None:
         """Write one or more device settings.
@@ -364,12 +436,12 @@ class DjiRomoApiClient:
     async def async_get_consumables(self) -> list[dict[str, Any]]:
         """Fetch robot consumable status."""
         payload = await self._device_request("GET", "consumables")
-        return payload.get("data", {}).get("list", [])
+        return _dict_list(_object(payload.get("data")).get("list"))
 
     async def async_get_dock_consumables(self) -> dict[str, Any]:
         """Fetch dock consumable and tank status."""
         payload = await self._device_request("GET", "consumables/dock")
-        return payload.get("data", {})
+        return _object(payload.get("data"))
 
     async def async_get_consumable_notifications(self) -> list[dict[str, Any]]:
         """Fetch consumable notifications."""
@@ -380,7 +452,7 @@ class DjiRomoApiClient:
                 "consumables/notifications",
                 params={"notify_type": notify_type},
             )
-            alerts.extend(payload.get("data", {}).get("list", []))
+            alerts.extend(_dict_list(_object(payload.get("data")).get("list")))
         return alerts
 
     async def async_start_clean(self) -> None:
@@ -403,13 +475,13 @@ class DjiRomoApiClient:
             area_configs.append(
                 {
                     "config_uuid": str(uuid4()),
-                    "clean_mode": config.get("clean_mode", 0),
+                    "clean_mode": config.get("clean_mode", 2),
                     "fan_speed": config.get("fan_speed", 2),
                     "water_level": config.get("water_level", 2),
                     "clean_num": config.get("clean_num", 1),
                     "storm_mode": config.get("storm_mode", 0),
                     "secondary_clean_num": config.get("secondary_clean_num", 1),
-                    "clean_speed": config.get("clean_speed", 2),
+                    "clean_speed": config.get("clean_speed", 0),
                     "order_id": config.get("order_id", 1),
                     "poly_type": config.get("poly_type", 2),
                     "poly_index": config.get("poly_index", 0),
@@ -473,7 +545,7 @@ class DjiRomoApiClient:
                 "clean_num": room_config.get("clean_num", 1),
                 "storm_mode": room_config.get("storm_mode", 0),
                 "secondary_clean_num": room_config.get("secondary_clean_num", 1),
-                "clean_speed": room_config.get("clean_speed", 2),
+                "clean_speed": room_config.get("clean_speed", 0),
                 "order_id": order_id,
                 "poly_type": room_config.get("poly_type", 2),
                 "poly_index": room_config.get("poly_index", 0),
@@ -611,25 +683,34 @@ class DjiRomoApiClient:
                 params=params,
                 json=json,
                 raise_for_status=True,
+                timeout=_API_TIMEOUT,
             ) as response:
-                payload: dict[str, Any] = await response.json()
+                payload = await _read_json_object(response, "DJI Romo device API")
         except ClientResponseError as err:
-            if err.status == 401:
-                raise DjiRomoAuthError("The DJI Home user token is invalid or expired.") from err
+            if err.status in {401, 403}:
+                raise DjiRomoAuthError(
+                    "The DJI Home user token is invalid or expired."
+                ) from err
             raise DjiRomoApiError(
                 f"Failed to call DJI Romo device API: {err.status} {err.message}"
             ) from err
-        except ClientError as err:
+        except (ClientError, TimeoutError) as err:
             raise DjiRomoApiError(f"Failed to call DJI Romo device API: {err}") from err
 
         result = payload.get("result", {})
-        result_code = _coerce_result_code(result.get("code"))
+        result_code = _coerce_result_code(
+            result.get("code") if isinstance(result, dict) else None
+        )
         allowed = allowed_result_codes or {0}
         if result_code not in allowed:
-            message = result.get("message") or "Unknown DJI Romo device API error"
+            message = (
+                result.get("message") if isinstance(result, dict) else None
+            ) or "Unknown DJI Romo device API error"
+            if _is_auth_failure(result_code, message):
+                raise DjiRomoAuthError(message)
             raise DjiRomoApiError(message)
 
-        _LOGGER.debug("DJI Romo device API response for %s %s: %s", method, path, payload)
+        _LOGGER.debug("DJI Romo device API request succeeded: %s %s", method, path)
         return payload
 
     async def _request(
@@ -648,21 +729,29 @@ class DjiRomoApiClient:
                 headers=headers,
                 params=params,
                 raise_for_status=True,
+                timeout=_API_TIMEOUT,
             ) as response:
-                payload: dict[str, Any] = await response.json()
-        except ClientError as err:
-            if isinstance(err, ClientResponseError) and err.status == 401:
-                raise DjiRomoAuthError("The DJI Home user token is invalid or expired.") from err
+                payload = await _read_json_object(response, "DJI Home API")
+        except (ClientError, TimeoutError) as err:
+            if isinstance(err, ClientResponseError) and err.status in {401, 403}:
+                raise DjiRomoAuthError(
+                    "The DJI Home user token is invalid or expired."
+                ) from err
             raise DjiRomoApiError(f"Failed to call DJI Home API: {err}") from err
 
         result = payload.get("result", {})
-        if _coerce_result_code(result.get("code")) != 0:
-            message = result.get("message") or "Unknown DJI Home API error"
-            if "token" in message.lower() or "auth" in message.lower():
+        result_code = _coerce_result_code(
+            result.get("code") if isinstance(result, dict) else None
+        )
+        if result_code != 0:
+            message = (
+                result.get("message") if isinstance(result, dict) else None
+            ) or "Unknown DJI Home API error"
+            if _is_auth_failure(result_code, message):
                 raise DjiRomoAuthError(message)
             raise DjiRomoApiError(message)
 
-        _LOGGER.debug("DJI Home API response for %s: %s", path, payload)
+        _LOGGER.debug("DJI Home API request succeeded: %s", path)
         return payload
 
     def _headers(self, *, include_json: bool = False) -> dict[str, str]:
@@ -677,6 +766,41 @@ class DjiRomoApiClient:
         if include_json:
             headers["Content-Type"] = "application/json"
         return headers
+
+
+async def _read_json_object(
+    response: ClientResponse,
+    source: str,
+) -> dict[str, Any]:
+    """Read an API response and reject malformed or non-object JSON."""
+    try:
+        payload = await response.json(content_type=None)
+    except (UnicodeDecodeError, ValueError) as err:
+        raise DjiRomoApiError(f"{source} returned an invalid JSON response.") from err
+    if not isinstance(payload, dict):
+        raise DjiRomoApiError(f"{source} returned an unexpected JSON response.")
+    return payload
+
+
+def _object(value: Any) -> dict[str, Any]:
+    """Return a mapping value or an empty object for malformed API data."""
+    return value if isinstance(value, dict) else {}
+
+
+def _dict_list(value: Any) -> list[dict[str, Any]]:
+    """Return only object entries from an API list."""
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _is_auth_failure(result_code: int | None, message: str) -> bool:
+    """Return whether an API result indicates invalid account credentials."""
+    normalized = message.casefold()
+    return result_code in {401, 403} or any(
+        marker in normalized
+        for marker in ("token", "auth", "credential", "not logged in")
+    )
 
 
 def decode_grid_cells(
@@ -757,5 +881,3 @@ def _coerce_result_code(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-
-

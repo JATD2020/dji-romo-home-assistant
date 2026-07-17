@@ -58,13 +58,15 @@ def room_configs_from_shortcuts(
     all_configs: list[dict[str, Any]] = []
     for index, room in enumerate(sorted(rooms, key=_room_sort_key), start=1):
         poly_index = room.get("poly_index")
-        config = dict(configs.get(poly_index) or room)
+        # Plan configs carry the cleaning values, while device_map_rooms is the
+        # reliable source for labels and custom names. Keep both sets of fields.
+        config = {**room, **configs.get(poly_index, {})}
         config.setdefault("order_id", index)
         config.setdefault("clean_mode", 2)
         config.setdefault("fan_speed", 2)
         config.setdefault("water_level", 2)
         config.setdefault("clean_num", 1)
-        config.setdefault("clean_speed", 2)
+        config.setdefault("clean_speed", 0)
         all_configs.append(config)
 
     # Find label IDs that appear more than once so room_name can number them.
@@ -106,9 +108,18 @@ def room_name(room_config: dict[str, Any], duplicate_labels: set[int]) -> str:
 
 def _room_sort_key(room: dict[str, Any]) -> tuple[int, int]:
     order_id = room.get("order_id")
+    poly_index = room.get("poly_index")
+    try:
+        order = int(order_id)
+    except (TypeError, ValueError):
+        order = 999
+    try:
+        polygon = int(poly_index)
+    except (TypeError, ValueError):
+        polygon = 0
     return (
-        int(order_id) if isinstance(order_id, int) and order_id >= 0 else 999,
-        int(room.get("poly_index") or 0),
+        order if order >= 0 else 999,
+        polygon,
     )
 
 

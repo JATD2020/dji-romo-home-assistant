@@ -2,39 +2,33 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
-from .client import DjiRomoApiError, DjiRomoAuthError
+from .compat import AddConfigEntryEntitiesCallback
 from .const import PLAN_NAME_KEYS
 from .coordinator import DjiRomoCoordinator
 from .entity import DjiRomoCoordinatorEntity
 from .rooms import room_configs_from_shortcuts, room_name
 
-_LOGGER = logging.getLogger(__name__)
 PARALLEL_UPDATES = 0
 
 DOCK_ACTIONS = (
     {
         "key": "dust_collect",
-        "name": "Dust Collection",
         "icon": "mdi:delete-sweep",
     },
     {
         "key": "wash_mop_pads",
-        "name": "Wash Mop Pads",
         "icon": "mdi:waves",
     },
     {
         "key": "dry_mop_pads",
-        "name": "Dry Mop Pads",
         "icon": "mdi:fan",
     },
 )
@@ -47,21 +41,14 @@ async def async_setup_entry(
 ) -> None:
     """Set up Romo shortcut buttons."""
     coordinator = entry.runtime_data
-    try:
-        shortcuts = await coordinator.api.async_get_shortcuts()
-    except DjiRomoAuthError:
-        raise
-    except DjiRomoApiError as err:
-        _LOGGER.warning("Failed to fetch DJI Romo shortcuts: %s", err)
-        shortcuts = []
+    shortcuts = coordinator.shortcuts
 
     entities: list[ButtonEntity] = [
         DjiRomoShortcutButton(coordinator, shortcut, index)
         for index, shortcut in enumerate(shortcuts, start=1)
     ]
     entities.extend(
-        DjiRomoDockActionButton(coordinator, action)
-        for action in DOCK_ACTIONS
+        DjiRomoDockActionButton(coordinator, action) for action in DOCK_ACTIONS
     )
     entities.extend(
         DjiRomoRoomButton(coordinator, room, room_map, duplicate_labels)
@@ -86,8 +73,7 @@ class DjiRomoShortcutButton(DjiRomoCoordinatorEntity, ButtonEntity):
         self._shortcut = shortcut
         self._attr_name = _shortcut_name(shortcut, index)
         self._attr_unique_id = (
-            f"{coordinator.device_sn}_shortcut_"
-            f"{shortcut.get('plan_uuid') or index}"
+            f"{coordinator.device_sn}_shortcut_{shortcut.get('plan_uuid') or index}"
         )
 
     @property
@@ -172,7 +158,6 @@ class DjiRomoDockActionButton(DjiRomoCoordinatorEntity, ButtonEntity):
     ) -> None:
         super().__init__(coordinator)
         self._action = action
-        self._attr_name = action["name"]
         self._attr_translation_key = action["key"]
         self._attr_icon = action["icon"]
         self._attr_unique_id = f"{coordinator.device_sn}_{action['key']}"
@@ -202,7 +187,6 @@ class DjiRomoClearMapButton(DjiRomoCoordinatorEntity, ButtonEntity):
 
     def __init__(self, coordinator: DjiRomoCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_name = "Clear Map"
         self._attr_unique_id = f"{coordinator.device_sn}_clear_map"
 
     @property

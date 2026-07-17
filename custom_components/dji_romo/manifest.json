@@ -9,9 +9,6 @@
   "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/JATD2020/dji-romo-home-assistant/issues",
   "loggers": ["paho"],
-  "requirements": [
-    "paho-mqtt>=2.1.0",
-    "cryptography>=42.0.0"
-  ],
-  "version": "0.4.2"
+  "requirements": ["paho-mqtt==2.1.0"],
+  "version": "0.4.3"
 }

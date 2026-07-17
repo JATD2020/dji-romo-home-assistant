@@ -17,11 +17,12 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
+from .compat import AddConfigEntryEntitiesCallback
 from .coordinator import DjiRomoCoordinator
 from .entity import DjiRomoCoordinatorEntity
+from .helpers import setting_value, truthy
 
 PARALLEL_UPDATES = 0
 
@@ -40,27 +41,6 @@ class DjiRomoSwitchDescription(SwitchEntityDescription):
     param_fn: Callable[[DjiRomoCoordinator, bool], dict[str, Any]]
 
 
-def _setting(coordinator: DjiRomoCoordinator, *path: str) -> Any:
-    """Return a value from the REST settings payload by nested key path."""
-    current: Any = coordinator.data.cloud_data.get("settings", {})
-    for part in path:
-        if not isinstance(current, dict):
-            return None
-        current = current.get(part)
-    return current
-
-
-def _truthy(value: Any) -> bool | None:
-    """Coerce a 0/1 setting flag to bool, preserving None when absent."""
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    return None
-
-
 def _inverted(value: Any) -> bool | None:
     """Coerce an inverted 0/1 flag (1 = feature OFF) to the feature's on/off state."""
     if value is None:
@@ -77,8 +57,8 @@ SWITCHES: tuple[DjiRomoSwitchDescription, ...] = (
         name="Child Lock",
         icon="mdi:lock",
         entity_category=EntityCategory.CONFIG,
-        value_fn=lambda coordinator: _truthy(
-            _setting(coordinator, "is_child_lock_open")
+        value_fn=lambda coordinator: truthy(
+            setting_value(coordinator, "is_child_lock_open")
         ),
         param_fn=lambda coordinator, on: {"is_child_lock_open": 1 if on else 0},
     ),
@@ -91,7 +71,7 @@ SWITCHES: tuple[DjiRomoSwitchDescription, ...] = (
         # Inverted flag: the app's "void detection" ON maps to is_no_stair_mode = 0
         # ("no-stair mode" off), OFF maps to 1. Captured via MITM 2026-06-22.
         value_fn=lambda coordinator: _inverted(
-            _setting(coordinator, "is_no_stair_mode")
+            setting_value(coordinator, "is_no_stair_mode")
         ),
         param_fn=lambda coordinator, on: {"is_no_stair_mode": 0 if on else 1},
     ),
@@ -104,7 +84,7 @@ SWITCHES: tuple[DjiRomoSwitchDescription, ...] = (
         # Caps the resting charge at 80% to slow battery aging. Non-inverted
         # (ON = 1), captured via MITM 2026-06-22. Reads the REST setting (the
         # osd battery_care_active flag is its live mirror).
-        value_fn=lambda coordinator: _truthy(_setting(coordinator, "battery_care")),
+        value_fn=lambda coordinator: truthy(setting_value(coordinator, "battery_care")),
         param_fn=lambda coordinator, on: {"battery_care": 1 if on else 0},
     ),
     DjiRomoSwitchDescription(
@@ -116,12 +96,12 @@ SWITCHES: tuple[DjiRomoSwitchDescription, ...] = (
         # Nested setting: the app sends the whole no_disturb object (the schedule
         # is managed in the app), so we preserve the sibling fields and only flip
         # is_open. Captured via MITM 2026-06-22.
-        value_fn=lambda coordinator: _truthy(
-            _setting(coordinator, "no_disturb", "is_open")
+        value_fn=lambda coordinator: truthy(
+            setting_value(coordinator, "no_disturb", "is_open")
         ),
         param_fn=lambda coordinator, on: {
             "no_disturb": {
-                **(_setting(coordinator, "no_disturb") or {}),
+                **(setting_value(coordinator, "no_disturb") or {}),
                 "is_open": 1 if on else 0,
             }
         },
@@ -134,12 +114,10 @@ SWITCHES: tuple[DjiRomoSwitchDescription, ...] = (
         entity_category=EntityCategory.CONFIG,
         # Washes the mop pads with hot water at the dock. Non-inverted (ON = 1),
         # captured via MITM 2026-06-22.
-        value_fn=lambda coordinator: _truthy(
-            _setting(coordinator, "wash_mop_with_hot_water")
+        value_fn=lambda coordinator: truthy(
+            setting_value(coordinator, "wash_mop_with_hot_water")
         ),
-        param_fn=lambda coordinator, on: {
-            "wash_mop_with_hot_water": 1 if on else 0
-        },
+        param_fn=lambda coordinator, on: {"wash_mop_with_hot_water": 1 if on else 0},
     ),
     DjiRomoSwitchDescription(
         key="auto_add_cleaner",
@@ -150,12 +128,12 @@ SWITCHES: tuple[DjiRomoSwitchDescription, ...] = (
         # Nested setting: the app sends the whole add_cleaner_auto object, so we
         # preserve the sibling (sewage_tank_deodorizer) and only flip is_add_in_mop.
         # Captured via MITM 2026-06-22.
-        value_fn=lambda coordinator: _truthy(
-            _setting(coordinator, "add_cleaner_auto", "is_add_in_mop")
+        value_fn=lambda coordinator: truthy(
+            setting_value(coordinator, "add_cleaner_auto", "is_add_in_mop")
         ),
         param_fn=lambda coordinator, on: {
             "add_cleaner_auto": {
-                **(_setting(coordinator, "add_cleaner_auto") or {}),
+                **(setting_value(coordinator, "add_cleaner_auto") or {}),
                 "is_add_in_mop": 1 if on else 0,
             }
         },
@@ -174,12 +152,12 @@ SWITCHES: tuple[DjiRomoSwitchDescription, ...] = (
     #     name="Sewage Tank Deodorizer",
     #     icon="mdi:scent",
     #     entity_category=EntityCategory.CONFIG,
-    #     value_fn=lambda coordinator: _truthy(
-    #         _setting(coordinator, "add_cleaner_auto", "sewage_tank_deodorizer")
+    #     value_fn=lambda coordinator: truthy(
+    #         setting_value(coordinator, "add_cleaner_auto", "sewage_tank_deodorizer")
     #     ),
     #     param_fn=lambda coordinator, on: {
     #         "add_cleaner_auto": {
-    #             **(_setting(coordinator, "add_cleaner_auto") or {}),
+    #             **(setting_value(coordinator, "add_cleaner_auto") or {}),
     #             "sewage_tank_deodorizer": 1 if on else 0,
     #         }
     #     },
@@ -191,12 +169,10 @@ SWITCHES: tuple[DjiRomoSwitchDescription, ...] = (
         icon="mdi:grain",
         entity_category=EntityCategory.CONFIG,
         # Flat key, non-inverted (ON = 1). Captured via MITM 2026-06-22.
-        value_fn=lambda coordinator: _truthy(
-            _setting(coordinator, "enhance_particle_clean")
+        value_fn=lambda coordinator: truthy(
+            setting_value(coordinator, "enhance_particle_clean")
         ),
-        param_fn=lambda coordinator, on: {
-            "enhance_particle_clean": 1 if on else 0
-        },
+        param_fn=lambda coordinator, on: {"enhance_particle_clean": 1 if on else 0},
     ),
     DjiRomoSwitchDescription(
         key="auto_dust_box_drying",
@@ -208,12 +184,12 @@ SWITCHES: tuple[DjiRomoSwitchDescription, ...] = (
         # siblings (mode, auto_enable) and only flip dust_box_drying. This is the
         # on/off setting, not the live drying activity (see the Drying Status
         # sensor). Captured via MITM 2026-06-22.
-        value_fn=lambda coordinator: _truthy(
-            _setting(coordinator, "drying", "dust_box_drying")
+        value_fn=lambda coordinator: truthy(
+            setting_value(coordinator, "drying", "dust_box_drying")
         ),
         param_fn=lambda coordinator, on: {
             "drying": {
-                **(_setting(coordinator, "drying") or {}),
+                **(setting_value(coordinator, "drying") or {}),
                 "dust_box_drying": 1 if on else 0,
             }
         },
@@ -227,12 +203,12 @@ SWITCHES: tuple[DjiRomoSwitchDescription, ...] = (
         # Nested setting in the same drying object as auto_dust_box_drying; the
         # write lock keeps the two from clobbering. Preserves siblings (mode,
         # dust_box_drying), flips auto_enable. Captured via MITM 2026-06-22.
-        value_fn=lambda coordinator: _truthy(
-            _setting(coordinator, "drying", "auto_enable")
+        value_fn=lambda coordinator: truthy(
+            setting_value(coordinator, "drying", "auto_enable")
         ),
         param_fn=lambda coordinator, on: {
             "drying": {
-                **(_setting(coordinator, "drying") or {}),
+                **(setting_value(coordinator, "drying") or {}),
                 "auto_enable": 1 if on else 0,
             }
         },
@@ -246,12 +222,12 @@ SWITCHES: tuple[DjiRomoSwitchDescription, ...] = (
         # Nested in the wash_back object (shared with the cleaning_frequency select;
         # the write lock keeps them from clobbering). Preserves wash_back_area, flips
         # distinguish_room. Captured via MITM 2026-06-22.
-        value_fn=lambda coordinator: _truthy(
-            _setting(coordinator, "wash_back", "distinguish_room")
+        value_fn=lambda coordinator: truthy(
+            setting_value(coordinator, "wash_back", "distinguish_room")
         ),
         param_fn=lambda coordinator, on: {
             "wash_back": {
-                **(_setting(coordinator, "wash_back") or {}),
+                **(setting_value(coordinator, "wash_back") or {}),
                 "distinguish_room": 1 if on else 0,
             }
         },
@@ -265,12 +241,12 @@ SWITCHES: tuple[DjiRomoSwitchDescription, ...] = (
         # Master toggle of the ai_recognition object (shared with the liquid_response,
         # obstacle_mode and low_clearance selects; the write lock keeps them from
         # clobbering). Preserves siblings, flips is_open. Captured via MITM 2026-06-22.
-        value_fn=lambda coordinator: _truthy(
-            _setting(coordinator, "ai_recognition", "is_open")
+        value_fn=lambda coordinator: truthy(
+            setting_value(coordinator, "ai_recognition", "is_open")
         ),
         param_fn=lambda coordinator, on: {
             "ai_recognition": {
-                **(_setting(coordinator, "ai_recognition") or {}),
+                **(setting_value(coordinator, "ai_recognition") or {}),
                 "is_open": 1 if on else 0,
             }
         },
@@ -282,8 +258,8 @@ SWITCHES: tuple[DjiRomoSwitchDescription, ...] = (
         icon="mdi:camera",
         entity_category=EntityCategory.CONFIG,
         # Flat key, non-inverted (ON = 1). Captured via MITM 2026-06-22.
-        value_fn=lambda coordinator: _truthy(
-            _setting(coordinator, "obstacle_picture_mode")
+        value_fn=lambda coordinator: truthy(
+            setting_value(coordinator, "obstacle_picture_mode")
         ),
         param_fn=lambda coordinator, on: {"obstacle_picture_mode": 1 if on else 0},
     ),
@@ -304,7 +280,7 @@ SWITCHES: tuple[DjiRomoSwitchDescription, ...] = (
     #     name="Auto Mop Wash",
     #     icon="mdi:waves",
     #     entity_category=EntityCategory.CONFIG,
-    #     value_fn=lambda coordinator: _truthy(_setting(coordinator, "auto_wash")),
+    #     value_fn=lambda coordinator: truthy(setting_value(coordinator, "auto_wash")),
     #     param_fn=lambda coordinator, on: {"auto_wash": 1 if on else 0},
     # ),
     # --- DISABLED / UNVERIFIED: flat flags not visible in the app -------------
@@ -321,7 +297,7 @@ SWITCHES: tuple[DjiRomoSwitchDescription, ...] = (
     #     name="Enhanced Stain Cleaning",
     #     icon="mdi:liquid-spot",
     #     entity_category=EntityCategory.CONFIG,
-    #     value_fn=lambda coordinator: _truthy(_setting(coordinator, "enhance_stain_clean")),
+    #     value_fn=lambda coordinator: truthy(setting_value(coordinator, "enhance_stain_clean")),
     #     param_fn=lambda coordinator, on: {"enhance_stain_clean": 1 if on else 0},
     # ),
     # DjiRomoSwitchDescription(
@@ -330,7 +306,7 @@ SWITCHES: tuple[DjiRomoSwitchDescription, ...] = (
     #     name="Mop Ozone Deodorizer",
     #     icon="mdi:scent",
     #     entity_category=EntityCategory.CONFIG,
-    #     value_fn=lambda coordinator: _truthy(_setting(coordinator, "mop_ozone_deodorizer")),
+    #     value_fn=lambda coordinator: truthy(setting_value(coordinator, "mop_ozone_deodorizer")),
     #     param_fn=lambda coordinator, on: {"mop_ozone_deodorizer": 1 if on else 0},
     # ),
     # DjiRomoSwitchDescription(
@@ -340,7 +316,7 @@ SWITCHES: tuple[DjiRomoSwitchDescription, ...] = (
     #     icon="mdi:led-on",
     #     entity_category=EntityCategory.CONFIG,
     #     # NOTE: instruct_light_status may be an enum (light mode), not a 0/1 flag.
-    #     value_fn=lambda coordinator: _truthy(_setting(coordinator, "instruct_light_status")),
+    #     value_fn=lambda coordinator: truthy(setting_value(coordinator, "instruct_light_status")),
     #     param_fn=lambda coordinator, on: {"instruct_light_status": 1 if on else 0},
     # ),
 )

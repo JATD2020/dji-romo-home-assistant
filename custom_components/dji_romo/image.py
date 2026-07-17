@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from base64 import b64encode
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from itertools import groupby
 from math import atan2, cos, degrees, radians, sin
 from pathlib import Path
@@ -11,17 +11,20 @@ from pathlib import Path
 from homeassistant.components.image import ImageEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .client import decode_grid_cells
+from .compat import AddConfigEntryEntitiesCallback
 from .coordinator import DjiRomoCoordinator, RomoSnapshot
 from .entity import DjiRomoCoordinatorEntity
+from .rendering import svg_room_legend, svg_text
 from .rooms import duplicate_label_ids, room_name
+
 PARALLEL_UPDATES = 0
 
 _ROBOT_MARKER_SIZE = 15
 _ROBOT_IMAGE_HEADING_OFFSET = 90.0
 _ROBOT_TOP_IMAGE = Path(__file__).parent / "robot_top.png"
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -36,7 +39,7 @@ async def async_setup_entry(
 
 class DjiRomoMapImage(DjiRomoCoordinatorEntity, ImageEntity):
     """SVG trajectory map showing robot path, robot position, and dock.
-    
+
     Dynamically switches between the live map (during cleaning) and the
     historical last cleaning report (when idle/docked).
     """
@@ -68,33 +71,31 @@ class DjiRomoMapImage(DjiRomoCoordinatorEntity, ImageEntity):
         Falls back to the REST refresh time so the entity has a state (and is
         not "unavailable") before the first MQTT osd message arrives.
         """
-        from datetime import UTC, datetime, timedelta
-        
         data = self.coordinator.data
         if not data:
             return None
-            
+
         is_active = data.activity in {"cleaning", "paused", "returning", "error"}
-        
-        # mission_bid from MQTT is instantly updated. last_job from REST lags.
-        last_job_uuid = data.last_job.get("uuid") if data.last_job else None
-        latest_known_uuid = data.mission_bid or last_job_uuid
-        
-        # When docked/idle, show the end time of the last cleaning job, but ONLY
-        # if the REST API has actually fetched this newly finished job.
-        if not is_active and data.last_job and last_job_uuid == latest_known_uuid:
+
+        display_job_uuid = _display_job_uuid(data, is_active=is_active)
+
+        # At the dock, use the completed REST job rather than a stale MQTT bid.
+        # The coordinator requests an immediate REST refresh after activity ends.
+        if not is_active and data.last_job:
             end_time = data.last_job.get("end_time")
             if end_time and isinstance(end_time, (int, float)) and end_time > 0:
                 dt = datetime.fromtimestamp(end_time, tz=UTC)
-                
+
                 # If the final report map is available, append a microsecond to bust
                 # the browser cache and load the new SVG without changing the UI display time.
                 has_latest_report = bool(
-                    data.last_clean_map_uuid and latest_known_uuid and data.last_clean_map_uuid == latest_known_uuid
+                    data.last_clean_map_uuid
+                    and display_job_uuid
+                    and data.last_clean_map_uuid == display_job_uuid
                 )
                 if has_latest_report:
                     dt += timedelta(microseconds=1)
-                
+
                 return dt
 
         stamps = [t for t in (data.last_updated, data.cloud_last_updated) if t]
@@ -109,20 +110,29 @@ class DjiRomoMapImage(DjiRomoCoordinatorEntity, ImageEntity):
         data = self.coordinator.data
         if not data:
             return None
-            
+
         is_active = data.activity in {"cleaning", "paused", "returning", "error"}
-        
-        last_job_uuid = data.last_job.get("uuid") if data.last_job else None
-        latest_known_uuid = data.mission_bid or last_job_uuid
-        
+
+        display_job_uuid = _display_job_uuid(data, is_active=is_active)
+
         has_latest_report = bool(
-            data.last_clean_map_uuid and latest_known_uuid and data.last_clean_map_uuid == latest_known_uuid
+            data.last_clean_map_uuid
+            and display_job_uuid
+            and data.last_clean_map_uuid == display_job_uuid
         )
-        
+
         if not is_active and data.last_clean_map and has_latest_report:
             return _generate_report_svg(data, self._robot_image_uri).encode("utf-8")
         else:
             return _generate_map_svg(data, self._robot_image_uri).encode("utf-8")
+
+
+def _display_job_uuid(data: RomoSnapshot, *, is_active: bool) -> str | None:
+    """Return the job identity that owns the currently displayed map."""
+    last_job_uuid = data.last_job.get("uuid") if data.last_job else None
+    if is_active:
+        return data.mission_bid or last_job_uuid
+    return last_job_uuid
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +144,7 @@ _EMPTY_SVG = (
     '<rect width="300" height="160" fill="var(--card-background-color,#1c1c1e)" rx="6"/>'
     '<text x="150" y="84" text-anchor="middle" font-size="12" fill="#888" '
     'font-family="sans-serif">No position data yet</text>'
-    '</svg>'
+    "</svg>"
 )
 
 
@@ -200,7 +210,7 @@ def _generate_map_svg(data: RomoSnapshot, robot_image_uri: str | None = None) ->
 
     parts: list[str] = [
         f'<svg viewBox="0 0 {svg_w} {svg_h}" xmlns="http://www.w3.org/2000/svg">',
-        '<defs>'
+        "<defs>"
         '<pattern id="rc" width="5" height="5" patternUnits="userSpaceOnUse">'
         '<rect x="0.35" y="0.35" width="1.8" height="1.8" fill="#cfd0d0"/>'
         '<rect x="2.85" y="2.85" width="1.8" height="1.8" fill="#cfd0d0"/></pattern>'
@@ -208,28 +218,32 @@ def _generate_map_svg(data: RomoSnapshot, robot_image_uri: str | None = None) ->
         'patternTransform="rotate(45)">'
         '<rect width="7.5" height="7.5" fill="#e18f81"/>'
         '<rect width="3.8" height="7.5" fill="#e34d35"/></pattern>'
-        '</defs>',
+        "</defs>",
         f'<rect width="{svg_w}" height="{svg_h}" fill="#e8eaee" rx="6"/>',
     ]
 
     # Floor plan: 3 passes (grey border base, white accessible area, grey outline).
     if polys:
-        room_polys = [p for p in polys if len(p.get("border_vertices", p.get("vertices", []))) >= 3]
+        room_polys = [
+            p
+            for p in polys
+            if len(p.get("border_vertices", p.get("vertices", []))) >= 3
+        ]
         dup_labels = duplicate_label_ids(room_polys)
-        
+
         for poly in room_polys:
             verts = poly.get("border_vertices", poly.get("vertices", []))
             svg_verts = [to_svg(v["x"], v["y"]) for v in verts]
             pts_str = " ".join(f"{x},{y}" for x, y in svg_verts)
             parts.append(f'<polygon points="{pts_str}" fill="#d6d8db"/>')
-            
+
         for poly in room_polys:
             verts = poly.get("vertices", [])
             if len(verts) >= 3:
                 svg_verts = [to_svg(v["x"], v["y"]) for v in verts]
                 pts_str = " ".join(f"{x},{y}" for x, y in svg_verts)
                 parts.append(f'<polygon points="{pts_str}" fill="#f3f4f5"/>')
-                
+
         for poly in room_polys:
             verts = poly.get("border_vertices", poly.get("vertices", []))
             name = room_name(poly, dup_labels)
@@ -245,7 +259,7 @@ def _generate_map_svg(data: RomoSnapshot, robot_image_uri: str | None = None) ->
                 parts.append(
                     f'<text x="{cx}" y="{cy}" text-anchor="middle" dominant-baseline="middle" '
                     f'font-size="6.5" fill="{label_color}" font-family="sans-serif">'
-                    f'{name[:12]}</text>'
+                    f"{svg_text(name, 12)}</text>"
                 )
 
     # Occupancy grid (the scanned floor detail).
@@ -254,13 +268,16 @@ def _generate_map_svg(data: RomoSnapshot, robot_image_uri: str | None = None) ->
         for p in polys:
             vs = p.get("border_vertices") or []
             if vs:
-                pts = " ".join(f"{to_svg(v['x'], v['y'])[0]},{to_svg(v['x'], v['y'])[1]}" for v in vs)
+                pts = " ".join(
+                    f"{to_svg(v['x'], v['y'])[0]},{to_svg(v['x'], v['y'])[1]}"
+                    for v in vs
+                )
                 clip_polys.append(f'<polygon points="{pts}"/>')
-                
+
         if clip_polys:
             parts.append('<defs><clipPath id="live_floor_clip">')
             parts.extend(clip_polys)
-            parts.append('</clipPath></defs>')
+            parts.append("</clipPath></defs>")
             parts.append('<g clip-path="url(#live_floor_clip)">')
 
         info = data.grid_map_data.get("map_info", {})
@@ -294,7 +311,7 @@ def _generate_map_svg(data: RomoSnapshot, robot_image_uri: str | None = None) ->
         _draw_grid(decode_grid_cells(data.grid_map_data), "#78a0d2", "0.5")
 
         if clip_polys:
-            parts.append('</g>')
+            parts.append("</g>")
 
     # Carpet zones (darker texture)
     for c in data.carpet_polys:
@@ -302,9 +319,7 @@ def _generate_map_svg(data: RomoSnapshot, robot_image_uri: str | None = None) ->
         if len(verts) >= 3:
             svg_verts = [to_svg(v["x"], v["y"]) for v in verts]
             pts_str = " ".join(f"{x},{y}" for x, y in svg_verts)
-            parts.append(
-                f'<polygon points="{pts_str}" fill="url(#rc)" stroke="none"/>'
-            )
+            parts.append(f'<polygon points="{pts_str}" fill="url(#rc)" stroke="none"/>')
 
     # Restricted zones (red hatched or semi-transparent red)
     for r in data.restricted_polys:
@@ -332,7 +347,10 @@ def _generate_map_svg(data: RomoSnapshot, robot_image_uri: str | None = None) ->
     band: list[tuple[float, float]] = []
     prev_pt: tuple[float, float] | None = None
     for x, y in trajectory:
-        if prev_pt is not None and ((x - prev_pt[0]) ** 2 + (y - prev_pt[1]) ** 2) ** 0.5 <= 0.6:
+        if (
+            prev_pt is not None
+            and ((x - prev_pt[0]) ** 2 + (y - prev_pt[1]) ** 2) ** 0.5 <= 0.6
+        ):
             band.append(to_svg(x, y))
         else:
             if len(band) > 1:
@@ -343,7 +361,9 @@ def _generate_map_svg(data: RomoSnapshot, robot_image_uri: str | None = None) ->
         segs.append(band)
     elif len(band) == 1 and not segs:
         sx, sy = band[0]
-        parts.append(f'<circle cx="{sx}" cy="{sy}" r="1.5" fill="#2d78e1" opacity="0.9"/>')
+        parts.append(
+            f'<circle cx="{sx}" cy="{sy}" r="1.5" fill="#2d78e1" opacity="0.9"/>'
+        )
     for band in segs:
         pstr = " ".join(f"{x},{y}" for x, y in band)
         parts.append(
@@ -358,7 +378,7 @@ def _generate_map_svg(data: RomoSnapshot, robot_image_uri: str | None = None) ->
             f'<g transform="translate({sx} {sy}) scale(0.6)">'
             f'<rect x="-5" y="-6" width="10" height="12" rx="2" fill="#151515"/>'
             f'<path d="M 1,-3.5 L -2,0.5 H -0.5 L -1.5,4 L 2,-0.5 H 0.5 Z" fill="white"/>'
-            f'</g>'
+            f"</g>"
         )
 
     # Detected obstacles (orange circles)
@@ -402,17 +422,16 @@ def _generate_map_svg(data: RomoSnapshot, robot_image_uri: str | None = None) ->
         for i, room in enumerate(rooms):
             col = i % 2
             row = i // 2
-            name = room.get("name", f"Room {room.get('poly_index', '')}")
+            name = room.get("name") or f"Room {room.get('poly_index', '')}"
             area = room.get("area", 0)
             active = name == data.current_room
             fill = "#3498db" if active else "#282d37"
-            prefix = "▶ " if active else "• "
             rx_text = round(15 + col * col_width, 1)
             ry_text = sep_y + 14 + row * 14
             parts.append(
                 f'<text x="{rx_text}" y="{ry_text}" fill="{fill}" '
                 f'font-size="9" font-family="sans-serif">'
-                f'{prefix}{name}: {area:.0f} m²</text>'
+                f"{svg_room_legend(name, area, active=active)}</text>"
             )
 
     parts.append("</svg>")
@@ -480,7 +499,7 @@ def _generate_report_svg(data: RomoSnapshot, robot_image_uri: str | None = None)
 
     parts: list[str] = [
         f'<svg viewBox="0 0 {svg_w} {svg_h}" xmlns="http://www.w3.org/2000/svg">',
-        '<defs>'
+        "<defs>"
         # Carpet: light-grey dotted texture matching the DJI app — a square dot
         # grid rotated 45° (two dots on the tile diagonal), so successive rows are
         # offset by half the horizontal period for the app's staggered "damier" look.
@@ -495,7 +514,7 @@ def _generate_report_svg(data: RomoSnapshot, robot_image_uri: str | None = None)
         'patternTransform="rotate(45)">'
         '<rect width="7.5" height="7.5" fill="#e18f81"/>'
         '<rect width="3.8" height="7.5" fill="#e34d35"/></pattern>'
-        '</defs>',
+        "</defs>",
         f'<rect width="{svg_w}" height="{svg_h}" fill="#e8eaee" rx="6"/>',
     ]
 
@@ -531,13 +550,16 @@ def _generate_report_svg(data: RomoSnapshot, robot_image_uri: str | None = None)
         for p in polys:
             vs = p.get("border_vertices") or []
             if vs:
-                pts = " ".join(f"{to_svg(v['x'], v['y'])[0]},{to_svg(v['x'], v['y'])[1]}" for v in vs)
+                pts = " ".join(
+                    f"{to_svg(v['x'], v['y'])[0]},{to_svg(v['x'], v['y'])[1]}"
+                    for v in vs
+                )
                 clip_polys.append(f'<polygon points="{pts}"/>')
-                
+
         if clip_polys:
             parts.append('<defs><clipPath id="report_floor_clip">')
             parts.extend(clip_polys)
-            parts.append('</clipPath></defs>')
+            parts.append("</clipPath></defs>")
             parts.append('<g clip-path="url(#report_floor_clip)">')
 
         info = grid.get("map_info", {})
@@ -571,16 +593,14 @@ def _generate_report_svg(data: RomoSnapshot, robot_image_uri: str | None = None)
         _draw_grid(decode_grid_cells(grid), "#78a0d2", "0.5")
 
         if clip_polys:
-            parts.append('</g>')
+            parts.append("</g>")
 
     # Carpets + no-go zones (hatched).
     for c in (report_map.get("carpet_layer") or {}).get("data", []):
         vs = c.get("vertices", [])
         if len(vs) >= 3:
             pstr = " ".join("{},{}".format(*to_svg(v["x"], v["y"])) for v in vs)
-            parts.append(
-                f'<polygon points="{pstr}" fill="url(#rc)" stroke="none"/>'
-            )
+            parts.append(f'<polygon points="{pstr}" fill="url(#rc)" stroke="none"/>')
     for r in (report_map.get("restricted_layer") or {}).get("data", []):
         vs = r.get("vertices", [])
         if len(vs) >= 3:
@@ -649,7 +669,7 @@ def _generate_report_svg(data: RomoSnapshot, robot_image_uri: str | None = None)
             f'<g transform="translate({sx} {sy}) scale(0.6)">'
             f'<rect x="-5" y="-6" width="10" height="12" rx="2" fill="#151515"/>'
             f'<path d="M 1,-3.5 L -2,0.5 H -0.5 L -1.5,4 L 2,-0.5 H 0.5 Z" fill="white"/>'
-            f'</g>'
+            f"</g>"
         )
     rb = report_map.get("robot_pos") or {}
     if rb.get("crobot_position_x") is not None:
@@ -676,7 +696,8 @@ def _generate_report_svg(data: RomoSnapshot, robot_image_uri: str | None = None)
         cx, cy = _polygon_centroid(sv)
         parts.append(
             f'<text x="{cx}" y="{cy}" text-anchor="middle" dominant-baseline="middle" '
-            f'font-size="7.5" fill="#282d37" font-family="sans-serif">{name[:14]}</text>'
+            f'font-size="7.5" fill="#282d37" font-family="sans-serif">'
+            f"{svg_text(name, 14)}</text>"
         )
 
     # Room legend (2 columns).
@@ -690,17 +711,16 @@ def _generate_report_svg(data: RomoSnapshot, robot_image_uri: str | None = None)
         for i, room in enumerate(rooms):
             col = i % 2
             row = i // 2
-            name = room.get("name", f"Room {room.get('poly_index', '')}")
+            name = room.get("name") or f"Room {room.get('poly_index', '')}"
             area = room.get("area", 0)
             active = name == data.current_room
             fill = "#3498db" if active else "#282d37"
-            prefix = "▶ " if active else "• "
             rx_text = round(15 + col * col_width, 1)
             ry_text = sep_y + 14 + row * 14
             parts.append(
                 f'<text x="{rx_text}" y="{ry_text}" fill="{fill}" '
                 f'font-size="9" font-family="sans-serif">'
-                f'{prefix}{name}: {area:.0f} m²</text>'
+                f"{svg_room_legend(name, area, active=active)}</text>"
             )
 
     parts.append("</svg>")
@@ -769,9 +789,7 @@ def _robot_marker_svg(
         return _robot_marker_fallback_svg(sx, sy, yaw, map_rotation)
 
     rotation = (
-        0
-        if yaw is None
-        else round(_ROBOT_IMAGE_HEADING_OFFSET - yaw - map_rotation, 1)
+        0 if yaw is None else round(_ROBOT_IMAGE_HEADING_OFFSET - yaw - map_rotation, 1)
     )
     size = _ROBOT_MARKER_SIZE
     x = round(sx - size / 2, 1)
@@ -782,7 +800,7 @@ def _robot_marker_svg(
         f'fill="#0f1720" opacity="0.22"/>'
         f'<image href="{image_uri}" x="{x}" y="{y}" width="{size}" height="{size}" '
         f'preserveAspectRatio="xMidYMid meet"/>'
-        f'</g>'
+        f"</g>"
     )
 
 
@@ -822,5 +840,5 @@ def _robot_marker_fallback_svg(
         f'stroke="#c5d0d5" stroke-width="0.9" stroke-linecap="round"/>'
         f'<circle cx="{round(sx + 6.2, 1)}" cy="{round(sy - 1.8, 1)}" '
         f'r="1" fill="#5b6b75"/>'
-        f'</g>'
+        f"</g>"
     )

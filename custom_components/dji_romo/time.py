@@ -17,11 +17,12 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
+from .compat import AddConfigEntryEntitiesCallback
 from .coordinator import DjiRomoCoordinator
 from .entity import DjiRomoCoordinatorEntity
+from .helpers import setting_value
 
 PARALLEL_UPDATES = 0
 
@@ -33,16 +34,6 @@ class DjiRomoSettingTimeDescription(TimeEntityDescription):
     obj_key: str  # nested settings object, e.g. "no_disturb"
     hour_key: str  # field holding the hour, e.g. "start_hour"
     minute_key: str  # field holding the minute, e.g. "start_minute"
-
-
-def _setting(coordinator: DjiRomoCoordinator, *path: str) -> Any:
-    """Return a value from the REST settings payload by nested key path."""
-    current: Any = coordinator.data.cloud_data.get("settings", {})
-    for part in path:
-        if not isinstance(current, dict):
-            return None
-        current = current.get(part)
-    return current
 
 
 TIMES: tuple[DjiRomoSettingTimeDescription, ...] = (
@@ -88,7 +79,9 @@ async def async_setup_entry(
 ) -> None:
     """Set up Romo time entities."""
     coordinator = entry.runtime_data
-    async_add_entities(DjiRomoSettingTime(coordinator, description) for description in TIMES)
+    async_add_entities(
+        DjiRomoSettingTime(coordinator, description) for description in TIMES
+    )
 
 
 class DjiRomoSettingTime(DjiRomoCoordinatorEntity, TimeEntity):
@@ -108,7 +101,7 @@ class DjiRomoSettingTime(DjiRomoCoordinatorEntity, TimeEntity):
     @property
     def native_value(self) -> time | None:
         """Return the stored HH:MM (None when not yet known)."""
-        obj = _setting(self.coordinator, self.entity_description.obj_key)
+        obj = setting_value(self.coordinator, self.entity_description.obj_key)
         if not isinstance(obj, dict):
             return None
         hour = obj.get(self.entity_description.hour_key)
@@ -125,7 +118,7 @@ class DjiRomoSettingTime(DjiRomoCoordinatorEntity, TimeEntity):
         desc = self.entity_description
 
         def build() -> dict[str, Any]:
-            obj = _setting(self.coordinator, desc.obj_key) or {}
+            obj = setting_value(self.coordinator, desc.obj_key) or {}
             return {
                 desc.obj_key: {
                     **obj,

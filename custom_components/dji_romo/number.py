@@ -11,12 +11,13 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
+from .compat import AddConfigEntryEntitiesCallback
 from .const import CONF_ROOM_CLEAN_NUM
 from .coordinator import DjiRomoCoordinator
 from .entity import DjiRomoCoordinatorEntity
+from .helpers import setting_value
 
 PARALLEL_UPDATES = 0
 
@@ -51,16 +52,6 @@ class DjiRomoSettingNumberDescription(NumberEntityDescription):
     param_fn: Callable[[DjiRomoCoordinator, int], dict[str, Any]]
 
 
-def _setting(coordinator: DjiRomoCoordinator, *path: str) -> Any:
-    """Return a value from the REST settings payload by nested key path."""
-    current: Any = coordinator.data.cloud_data.get("settings", {})
-    for part in path:
-        if not isinstance(current, dict):
-            return None
-        current = current.get(part)
-    return current
-
-
 SETTING_NUMBERS: tuple[DjiRomoSettingNumberDescription, ...] = (
     DjiRomoSettingNumberDescription(
         key="device_volume",
@@ -73,7 +64,7 @@ SETTING_NUMBERS: tuple[DjiRomoSettingNumberDescription, ...] = (
         native_step=1,
         native_unit_of_measurement=PERCENTAGE,
         # Flat key, 0-100. Captured via MITM 2026-06-22.
-        value_fn=lambda coordinator: _setting(coordinator, "device_volume"),
+        value_fn=lambda coordinator: setting_value(coordinator, "device_volume"),
         param_fn=lambda coordinator, val: {"device_volume": val},
     ),
 )
@@ -114,7 +105,9 @@ class DjiRomoRoomOptionNumber(DjiRomoCoordinatorEntity, NumberEntity):
     @property
     def native_value(self) -> float | None:
         """Return the selected value."""
-        return float(self.coordinator.room_cleaning_options[self.entity_description.key])
+        return float(
+            self.coordinator.room_cleaning_options[self.entity_description.key]
+        )
 
     async def async_set_native_value(self, value: float) -> None:
         """Persist a numeric option."""

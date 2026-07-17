@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import json
+from collections.abc import Mapping
 from typing import Any
 
+import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_NAME
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.selector import TextSelector, TextSelectorConfig
-import voluptuous as vol
+from homeassistant.helpers.selector import (
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
 
-from .client import DjiRomoApiClient, DjiRomoApiError
+from .client import DjiRomoApiClient, DjiRomoApiError, DjiRomoAuthError
 from .const import (
     CONF_API_URL,
     CONF_COMMAND_MAPPING,
@@ -30,12 +34,18 @@ from .const import (
     DEFAULT_SUBSCRIPTION_TOPICS,
     DOMAIN,
 )
+from .validation import (
+    format_mqtt_topic,
+    validate_api_url,
+    validate_command_mapping,
+    validate_subscription_topics,
+)
 
 
 class DjiRomoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for DJI Romo."""
 
-    VERSION = 1
+    VERSION = 2
 
     async def async_step_user(
         self,
@@ -47,12 +57,16 @@ class DjiRomoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             try:
                 data = await _validate_user_input(self.hass, user_input)
+            except DjiRomoAuthError:
+                errors["base"] = "invalid_auth"
             except DjiRomoApiError:
                 errors["base"] = "cannot_connect"
             except CannotDiscoverDeviceError:
                 errors["base"] = "cannot_discover_device"
             except MissingTokenError:
                 errors["base"] = "missing_token"
+            except InvalidApiUrlError:
+                errors["base"] = "invalid_api_url"
             else:
                 await self.async_set_unique_id(data[CONF_DEVICE_SN])
                 self._abort_if_unique_id_configured()
@@ -68,7 +82,9 @@ class DjiRomoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Optional(CONF_CREDENTIALS_TEXT): TextSelector(
                         TextSelectorConfig(multiline=True)
                     ),
-                    vol.Optional(CONF_USER_TOKEN): str,
+                    vol.Optional(CONF_USER_TOKEN): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                    ),
                     vol.Optional(CONF_DEVICE_SN): str,
                     vol.Optional(CONF_NAME): str,
                     vol.Optional(CONF_LOCALE, default=DEFAULT_LOCALE): str,
@@ -97,23 +113,41 @@ class DjiRomoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_DEVICE_SN: reauth_entry.data[CONF_DEVICE_SN],
                 CONF_NAME: reauth_entry.data[CONF_DEVICE_NAME],
                 CONF_LOCALE: reauth_entry.data.get(CONF_LOCALE, DEFAULT_LOCALE),
+                CONF_API_URL: reauth_entry.options.get(
+                    CONF_API_URL,
+                    reauth_entry.data.get(CONF_API_URL, DEFAULT_API_URL),
+                ),
                 **user_input,
             }
             try:
                 data = await _validate_user_input(self.hass, merged_input)
+            except DjiRomoAuthError:
+                errors["base"] = "invalid_auth"
             except DjiRomoApiError:
                 errors["base"] = "cannot_connect"
             except CannotDiscoverDeviceError:
                 errors["base"] = "cannot_discover_device"
             except MissingTokenError:
                 errors["base"] = "missing_token"
+            except InvalidApiUrlError:
+                errors["base"] = "invalid_api_url"
             else:
                 if data[CONF_DEVICE_SN] != reauth_entry.data[CONF_DEVICE_SN]:
                     errors["base"] = "wrong_device"
                 else:
+                    updated_data = {**reauth_entry.data, **data}
+                    if update_and_abort := getattr(
+                        self,
+                        "async_update_and_abort",
+                        None,
+                    ):
+                        return update_and_abort(
+                            reauth_entry,
+                            data=updated_data,
+                        )
                     return self.async_update_reload_and_abort(
                         reauth_entry,
-                        data={**reauth_entry.data, **data},
+                        data=updated_data,
                     )
 
         return self.async_show_form(
@@ -123,7 +157,9 @@ class DjiRomoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Optional(CONF_CREDENTIALS_TEXT): TextSelector(
                         TextSelectorConfig(multiline=True)
                     ),
-                    vol.Optional(CONF_USER_TOKEN): str,
+                    vol.Optional(CONF_USER_TOKEN): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                    ),
                 }
             ),
             errors=errors,
@@ -149,21 +185,52 @@ class DjiRomoOptionsFlow(config_entries.OptionsFlow):
 
         if user_input is not None:
             try:
-                command_mapping = json.loads(user_input[CONF_COMMAND_MAPPING])
-                subscription_topics = [
-                    topic.strip()
-                    for topic in user_input[CONF_SUBSCRIPTION_TOPICS].splitlines()
-                    if topic.strip()
-                ]
+                parsed_mapping = json.loads(user_input[CONF_COMMAND_MAPPING])
             except json.JSONDecodeError:
                 errors[CONF_COMMAND_MAPPING] = "invalid_json"
             else:
+                try:
+                    command_mapping = validate_command_mapping(parsed_mapping)
+                except ValueError:
+                    errors[CONF_COMMAND_MAPPING] = "invalid_command_mapping"
+
+            subscription_topics = [
+                topic.strip()
+                for topic in user_input[CONF_SUBSCRIPTION_TOPICS].splitlines()
+                if topic.strip()
+            ]
+            try:
+                validate_subscription_topics(subscription_topics)
+            except ValueError:
+                errors[CONF_SUBSCRIPTION_TOPICS] = "invalid_topic"
+
+            try:
+                format_mqtt_topic(
+                    user_input[CONF_COMMAND_TOPIC],
+                    "VALIDATION",
+                    allow_wildcards=False,
+                )
+            except ValueError:
+                errors[CONF_COMMAND_TOPIC] = "invalid_topic"
+
+            try:
+                api_url = validate_api_url(user_input[CONF_API_URL])
+            except ValueError:
+                errors[CONF_API_URL] = "invalid_api_url"
+
+            if not str(user_input[CONF_DEVICE_NAME]).strip():
+                errors[CONF_DEVICE_NAME] = "required"
+            if not str(user_input[CONF_LOCALE]).strip():
+                errors[CONF_LOCALE] = "required"
+
+            if not errors:
                 return self.async_create_entry(
                     title="",
                     data={
-                        CONF_DEVICE_NAME: user_input[CONF_DEVICE_NAME],
-                        CONF_API_URL: user_input[CONF_API_URL],
-                        CONF_LOCALE: user_input[CONF_LOCALE],
+                        **self.config_entry.options,
+                        CONF_DEVICE_NAME: str(user_input[CONF_DEVICE_NAME]).strip(),
+                        CONF_API_URL: api_url,
+                        CONF_LOCALE: str(user_input[CONF_LOCALE]).strip(),
                         CONF_COMMAND_TOPIC: user_input[CONF_COMMAND_TOPIC],
                         CONF_SUBSCRIPTION_TOPICS: subscription_topics,
                         CONF_COMMAND_MAPPING: command_mapping,
@@ -254,11 +321,18 @@ async def _validate_user_input(
 
     session = async_get_clientsession(hass)
     locale = (
-        user_input.get(CONF_LOCALE)
-        or parsed_credentials.get(CONF_LOCALE)
+        parsed_credentials.get(CONF_LOCALE)
+        or user_input.get(CONF_LOCALE)
         or DEFAULT_LOCALE
     )
-    api_url = parsed_credentials.get(CONF_API_URL) or DEFAULT_API_URL
+    try:
+        api_url = validate_api_url(
+            parsed_credentials.get(CONF_API_URL)
+            or user_input.get(CONF_API_URL)
+            or DEFAULT_API_URL
+        )
+    except ValueError as err:
+        raise InvalidApiUrlError from err
     client = DjiRomoApiClient(
         session,
         user_token,
@@ -268,7 +342,9 @@ async def _validate_user_input(
     # Validate the token using the endpoint we know is working.
     await client.async_get_mqtt_credentials()
 
-    requested_sn = user_input.get(CONF_DEVICE_SN) or parsed_credentials.get(CONF_DEVICE_SN) or None
+    requested_sn = (
+        user_input.get(CONF_DEVICE_SN) or parsed_credentials.get(CONF_DEVICE_SN) or None
+    )
     device_name = user_input.get(CONF_NAME)
     device_sn = requested_sn
 
@@ -383,3 +459,7 @@ class CannotDiscoverDeviceError(Exception):
 
 class MissingTokenError(Exception):
     """Raised when no token was entered or pasted."""
+
+
+class InvalidApiUrlError(Exception):
+    """Raised when pasted credentials contain a non-DJI API endpoint."""

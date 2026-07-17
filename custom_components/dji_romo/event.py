@@ -8,8 +8,8 @@ from homeassistant.components.event import EventEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from .compat import AddConfigEntryEntitiesCallback
 from .coordinator import DjiRomoCoordinator
 from .entity import DjiRomoCoordinatorEntity
 
@@ -39,7 +39,6 @@ class DjiRomoHmsEvent(DjiRomoCoordinatorEntity, EventEntity):
 
     def __init__(self, coordinator: DjiRomoCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_name = "Health Alert"
         self._attr_unique_id = f"{coordinator.device_sn}_hms"
         self._previous_alerts: list[dict[str, Any]] = list(coordinator.data.hms_alerts)
 

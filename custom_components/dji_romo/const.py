@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
 import json
+from datetime import timedelta
 
 DOMAIN = "dji_romo"
 
@@ -36,7 +36,9 @@ DEFAULT_COMMAND_MAPPING = {
     "return_to_base": {"method": "back_charge"},
     "locate": {"method": "find_robot"},
 }
-DEFAULT_COMMAND_MAPPING_JSON = json.dumps(DEFAULT_COMMAND_MAPPING, indent=2, sort_keys=True)
+DEFAULT_COMMAND_MAPPING_JSON = json.dumps(
+    DEFAULT_COMMAND_MAPPING, indent=2, sort_keys=True
+)
 
 # plan_name_key values DJI ships for the built-in cleaning programs. These are
 # stable across locales (the human-readable plan_name is localized, often to
@@ -55,6 +57,28 @@ DEFAULT_START_PLAN_KEYS = (
     "default_plan_name_daliy",
     "default_plan_name_deep",
     "default_plan_name_quick",
+)
+
+# A running status string has varied between captured API responses. Treat any
+# status outside this verified terminal set as active instead of guessing one
+# specific value.
+TERMINAL_JOB_STATUSES = frozenset(
+    {
+        "ok",
+        "canceled",
+        "cancelled",
+        "completed",
+        "complete",
+        "failed",
+        "fail",
+        "error",
+        "stopped",
+        "stop",
+        "timeout",
+        "interrupted",
+        "abort",
+        "aborted",
+    }
 )
 
 # DJI room-type IDs -> English labels (user_label / poly_label numbering).
@@ -100,23 +124,21 @@ TRAJECTORY_MAX_POINTS = 80000
 # a long session is downsampled to this before persisting.
 TRAJECTORY_STORAGE_POINTS = 8000
 TRAJECTORY_SAVE_DELAY = 30  # seconds; debounced disk writes
+CLEAN_PASS_TYPES = frozenset({48, 80, 112})
 
 # Home Assistant service to clean several named rooms in one job.
 SERVICE_CLEAN_ROOMS = "clean_rooms"
 ATTR_ROOMS = "rooms"
 COORDINATOR_REFRESH_INTERVAL = timedelta(minutes=5)
-# While the robot is actively cleaning we poll faster so the "current room"
-# sensor tracks the plan instead of waiting for the slow diagnostic refresh.
-CLEANING_REFRESH_INTERVAL = timedelta(seconds=60)
-# Settings/consumables/shortcuts barely change, so during the fast cleaning poll
-# we only refetch them this often instead of on every cycle.
-STATIC_REFRESH_INTERVAL = timedelta(minutes=5)
+# Settings, consumables and shortcuts barely change, so they are fetched less
+# often than live properties and cleaning jobs.
+STATIC_REFRESH_INTERVAL = timedelta(minutes=30)
 MQTT_CREDENTIAL_REFRESH_MARGIN = timedelta(minutes=15)
 # Fallback lifetime used only if the cloud stops returning an explicit expiry.
 MQTT_CREDENTIAL_ASSUMED_LIFETIME = timedelta(hours=4)
 
-# The robot pushes a device_osd property roughly once per second while online.
-# If we stop hearing from it for this long, treat the device as offline.
+# Once the broker disconnects, keep the last-known state briefly before marking
+# the robot unavailable. A connected docked robot may legitimately stay silent.
 OFFLINE_AFTER = timedelta(seconds=90)
 # How often to re-evaluate offline-by-silence without making any network calls.
 AVAILABILITY_CHECK_INTERVAL = timedelta(seconds=60)
@@ -131,9 +153,3 @@ CLOUD_REFRESH_FAILURE_LIMIT = 3
 # Home Assistant event fired when the robot reports a health-management (HMS)
 # alert, so automations can notify the user that the robot needs attention.
 EVENT_HMS = f"{DOMAIN}_hms"
-
-ATTR_LAST_TOPIC = "last_topic"
-ATTR_LAST_UPDATED = "last_updated"
-ATTR_MODEL = "model"
-ATTR_RAW_STATE = "raw_state"
-ATTR_SELECTED_TOPIC = "selected_topic"

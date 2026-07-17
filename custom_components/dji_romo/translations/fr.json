@@ -24,6 +24,8 @@
     "error": {
       "cannot_connect": "Impossible de se connecter à DJI Home.",
       "cannot_discover_device": "Le jeton est valide, mais le robot n'a pas pu être détecté automatiquement. Saisissez le numéro de série manuellement.",
+      "invalid_auth": "Le jeton DJI Home est invalide ou a expiré.",
+      "invalid_api_url": "L'URL de l'API doit être un point de terminaison DJI sécurisé sur djigate.com.",
       "invalid_json": "JSON invalide.",
       "missing_token": "Collez la sortie de l'extracteur ou saisissez un jeton utilisateur DJI.",
       "wrong_device": "Ces identifiants concernent un autre DJI Romo."
@@ -48,7 +50,11 @@
       }
     },
     "error": {
-      "invalid_json": "JSON invalide."
+      "invalid_api_url": "L'URL de l'API doit être un point de terminaison DJI sécurisé sur djigate.com.",
+      "invalid_command_mapping": "Les commandes doivent être un objet JSON avec des méthodes valides.",
+      "invalid_json": "JSON invalide.",
+      "invalid_topic": "Saisissez un sujet MQTT valide utilisant uniquement l'espace réservé {device_sn}.",
+      "required": "Ce champ est obligatoire."
     }
   },
   "issues": {
@@ -75,7 +81,7 @@
         "name": "Passages de nettoyage actuels"
       },
       "current_mopping_speed": {
-        "name": "Vitesse de serpillière actuelle"
+        "name": "Trajet actuel"
       },
       "firmware": {
         "name": "Micrologiciel"
@@ -244,7 +250,7 @@
         "name": "Niveau d'eau des pièces"
       },
       "room_clean_speed": {
-        "name": "Vitesse de serpillière des pièces"
+        "name": "Trajet de nettoyage des pièces"
       },
       "drying_mode": {
         "name": "Durée de séchage"

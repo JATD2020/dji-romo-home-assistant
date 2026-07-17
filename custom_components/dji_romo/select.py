@@ -11,9 +11,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
+from .cleaning import ROOM_CLEAN_MODE_OPTIONS, ROOM_ROUTE_OPTIONS
+from .compat import AddConfigEntryEntitiesCallback
 from .const import (
     CONF_ROOM_CLEAN_MODE,
     CONF_ROOM_CLEAN_SPEED,
@@ -22,6 +23,7 @@ from .const import (
 )
 from .coordinator import DjiRomoCoordinator
 from .entity import DjiRomoCoordinatorEntity
+from .helpers import setting_value
 
 PARALLEL_UPDATES = 0
 
@@ -38,13 +40,7 @@ SELECTS: tuple[DjiRomoSelectDescription, ...] = (
         key=CONF_ROOM_CLEAN_MODE,
         name="Room Cleaning Mode",
         icon="mdi:robot-vacuum",
-        option_map={
-            "Vacuum then Mop": 0,
-            "Vacuum and Mop": 1,
-            "Vacuum Only": 2,
-            "Mop Only": 3,
-            "Super clean": 4,
-        },
+        option_map=ROOM_CLEAN_MODE_OPTIONS,
     ),
     DjiRomoSelectDescription(
         key=CONF_ROOM_FAN_SPEED,
@@ -68,13 +64,9 @@ SELECTS: tuple[DjiRomoSelectDescription, ...] = (
     ),
     DjiRomoSelectDescription(
         key=CONF_ROOM_CLEAN_SPEED,
-        name="Room Mopping Speed",
-        icon="mdi:speedometer",
-        option_map={
-            "Slow": 1,
-            "Standard": 2,
-            "Fast": 3,
-        },
+        name="Room Route",
+        icon="mdi:routes",
+        option_map=ROOM_ROUTE_OPTIONS,
     ),
 )
 
@@ -93,16 +85,6 @@ class DjiRomoSettingSelectDescription(SelectEntityDescription):
     param_fn: Callable[[DjiRomoCoordinator, int], dict[str, Any]]
 
 
-def _setting(coordinator: DjiRomoCoordinator, *path: str) -> Any:
-    """Return a value from the REST settings payload by nested key path."""
-    current: Any = coordinator.data.cloud_data.get("settings", {})
-    for part in path:
-        if not isinstance(current, dict):
-            return None
-        current = current.get(part)
-    return current
-
-
 SETTING_SELECTS: tuple[DjiRomoSettingSelectDescription, ...] = (
     DjiRomoSettingSelectDescription(
         key="drying_mode",
@@ -114,9 +96,9 @@ SETTING_SELECTS: tuple[DjiRomoSettingSelectDescription, ...] = (
         # switches; the coordinator's write lock keeps them from clobbering).
         # Values captured via MITM 2026-06-22.
         option_map={"Energy Saving": 0, "Standard": 1, "Strong": 2},
-        value_fn=lambda coordinator: _setting(coordinator, "drying", "mode"),
+        value_fn=lambda coordinator: setting_value(coordinator, "drying", "mode"),
         param_fn=lambda coordinator, val: {
-            "drying": {**(_setting(coordinator, "drying") or {}), "mode": val}
+            "drying": {**(setting_value(coordinator, "drying") or {}), "mode": val}
         },
     ),
     DjiRomoSettingSelectDescription(
@@ -129,12 +111,12 @@ SETTING_SELECTS: tuple[DjiRomoSettingSelectDescription, ...] = (
         # wash_back object; preserves the sibling distinguish_room. Higher frequency
         # = lower numeric value. Values captured via MITM 2026-06-22.
         option_map={"Water Saving": 3, "Standard": 2, "High": 1},
-        value_fn=lambda coordinator: _setting(
+        value_fn=lambda coordinator: setting_value(
             coordinator, "wash_back", "wash_back_area"
         ),
         param_fn=lambda coordinator, val: {
             "wash_back": {
-                **(_setting(coordinator, "wash_back") or {}),
+                **(setting_value(coordinator, "wash_back") or {}),
                 "wash_back_area": val,
             }
         },
@@ -149,12 +131,12 @@ SETTING_SELECTS: tuple[DjiRomoSettingSelectDescription, ...] = (
         # preserves the siblings (is_open, obstacle_mode, vertical_obstacle_mode).
         # Values captured via MITM 2026-06-22.
         option_map={"Ignore": 0, "Avoid": 1, "Clean": 2},
-        value_fn=lambda coordinator: _setting(
+        value_fn=lambda coordinator: setting_value(
             coordinator, "ai_recognition", "liquid_avoid"
         ),
         param_fn=lambda coordinator, val: {
             "ai_recognition": {
-                **(_setting(coordinator, "ai_recognition") or {}),
+                **(setting_value(coordinator, "ai_recognition") or {}),
                 "liquid_avoid": val,
             }
         },
@@ -168,12 +150,12 @@ SETTING_SELECTS: tuple[DjiRomoSettingSelectDescription, ...] = (
         # ai_recognition.obstacle_mode, nested; preserves the siblings. Values
         # captured via MITM 2026-06-22.
         option_map={"Avoidance Priority": 2, "Standard": 0, "Cleaning Priority": 1},
-        value_fn=lambda coordinator: _setting(
+        value_fn=lambda coordinator: setting_value(
             coordinator, "ai_recognition", "obstacle_mode"
         ),
         param_fn=lambda coordinator, val: {
             "ai_recognition": {
-                **(_setting(coordinator, "ai_recognition") or {}),
+                **(setting_value(coordinator, "ai_recognition") or {}),
                 "obstacle_mode": val,
             }
         },
@@ -187,12 +169,12 @@ SETTING_SELECTS: tuple[DjiRomoSettingSelectDescription, ...] = (
         # ai_recognition.vertical_obstacle_mode (cleaning under low furniture),
         # nested; preserves the siblings. Values captured via MITM 2026-06-22.
         option_map={"Avoid Low Spaces": 2, "Standard": 0, "Max Coverage": 1},
-        value_fn=lambda coordinator: _setting(
+        value_fn=lambda coordinator: setting_value(
             coordinator, "ai_recognition", "vertical_obstacle_mode"
         ),
         param_fn=lambda coordinator, val: {
             "ai_recognition": {
-                **(_setting(coordinator, "ai_recognition") or {}),
+                **(setting_value(coordinator, "ai_recognition") or {}),
                 "vertical_obstacle_mode": val,
             }
         },
@@ -206,7 +188,7 @@ SETTING_SELECTS: tuple[DjiRomoSettingSelectDescription, ...] = (
         # meet_carpet_mode, flat key (what to do on a newly detected carpet).
         # Values captured via MITM 2026-06-22.
         option_map={"Suction Boost": 1, "Cross Carpet": 2, "Avoid Carpet": 3},
-        value_fn=lambda coordinator: _setting(coordinator, "meet_carpet_mode"),
+        value_fn=lambda coordinator: setting_value(coordinator, "meet_carpet_mode"),
         param_fn=lambda coordinator, val: {"meet_carpet_mode": val},
     ),
     DjiRomoSettingSelectDescription(
@@ -219,12 +201,12 @@ SETTING_SELECTS: tuple[DjiRomoSettingSelectDescription, ...] = (
         # (start_hour/start_minute/week_repeat). For Scheduled (3) the app also sets
         # those — exposing the schedule is a later enhancement. Captured 2026-06-22.
         option_map={"Auto": 1, "Manual": 2, "Scheduled": 3},
-        value_fn=lambda coordinator: _setting(
+        value_fn=lambda coordinator: setting_value(
             coordinator, "dust_collect", "collect_mode"
         ),
         param_fn=lambda coordinator, val: {
             "dust_collect": {
-                **(_setting(coordinator, "dust_collect") or {}),
+                **(setting_value(coordinator, "dust_collect") or {}),
                 "collect_mode": val,
             }
         },
@@ -251,12 +233,12 @@ SETTING_SELECTS: tuple[DjiRomoSettingSelectDescription, ...] = (
             "Saturday": 32,
             "Sunday": 64,
         },
-        value_fn=lambda coordinator: _setting(
+        value_fn=lambda coordinator: setting_value(
             coordinator, "dust_collect", "week_repeat"
         ),
         param_fn=lambda coordinator, val: {
             "dust_collect": {
-                **(_setting(coordinator, "dust_collect") or {}),
+                **(setting_value(coordinator, "dust_collect") or {}),
                 "week_repeat": val,
             }
         },
@@ -385,7 +367,7 @@ class DjiRomoVoiceLanguageSelect(DjiRomoCoordinatorEntity, SelectEntity):
     @property
     def current_option(self) -> str | None:
         """Return the label matching the active language code (None if unknown)."""
-        code = _setting(self.coordinator, "device_language")
+        code = setting_value(self.coordinator, "device_language")
         for label, lang_code in VOICE_LANGUAGES.items():
             if lang_code == code:
                 return label

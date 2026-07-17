@@ -24,6 +24,8 @@
     "error": {
       "cannot_connect": "Could not connect to DJI Home.",
       "cannot_discover_device": "Token is valid, but the robot could not be auto-discovered. Enter the device serial number manually.",
+      "invalid_auth": "The DJI Home token is invalid or expired.",
+      "invalid_api_url": "The API URL must be a secure DJI endpoint on djigate.com.",
       "invalid_json": "Invalid JSON.",
       "missing_token": "Paste extractor output or enter a DJI user token.",
       "wrong_device": "These credentials are for a different DJI Romo."
@@ -48,7 +50,11 @@
       }
     },
     "error": {
-      "invalid_json": "Invalid JSON."
+      "invalid_api_url": "The API URL must be a secure DJI endpoint on djigate.com.",
+      "invalid_command_mapping": "Commands must be a JSON object with valid method values.",
+      "invalid_json": "Invalid JSON.",
+      "invalid_topic": "Enter a valid MQTT topic using only the {device_sn} placeholder.",
+      "required": "This field is required."
     }
   },
   "issues": {
@@ -75,7 +81,7 @@
         "name": "Current Cleaning Passes"
       },
       "current_mopping_speed": {
-        "name": "Current Mopping Speed"
+        "name": "Current Route"
       },
       "firmware": {
         "name": "Firmware"
@@ -244,7 +250,7 @@
         "name": "Room Water Level"
       },
       "room_clean_speed": {
-        "name": "Room Mopping Speed"
+        "name": "Room Route"
       },
       "drying_mode": {
         "name": "Drying Duration"

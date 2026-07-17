@@ -22,19 +22,13 @@ from homeassistant.const import (
     UnitOfTime,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from .cleaning import CLEAN_MODE_LABELS, ROUTE_LABELS
+from .compat import AddConfigEntryEntitiesCallback
 from .coordinator import DjiRomoCoordinator
 from .entity import DjiRomoCoordinatorEntity
 
 PARALLEL_UPDATES = 0
-CLEAN_MODE_LABELS = {
-    0: "Vacuum then Mop",
-    1: "Vacuum and Mop",
-    2: "Vacuum Only",
-    3: "Mop Only",
-    4: "Super clean",
-}
 FAN_SPEED_LABELS = {
     1: "Quiet",
     2: "Standard",
@@ -44,12 +38,6 @@ WATER_LEVEL_LABELS = {
     1: "Low",
     2: "Medium",
     3: "High",
-}
-CLEAN_SPEED_LABELS = {
-    0: "Not Applicable",
-    1: "Slow",
-    2: "Standard",
-    3: "Fast",
 }
 DRYING_STAGE_LABELS = {
     "drying_box": "Drying Dust Box",
@@ -123,12 +111,10 @@ SENSORS: tuple[DjiRomoSensorDescription, ...] = (
     ),
     DjiRomoSensorDescription(
         key="current_mopping_speed",
-        name="Current Mopping Speed",
-        value_fn=lambda coordinator: _mode_aware_label(
-            coordinator,
+        name="Current Route",
+        value_fn=lambda coordinator: _label(
             coordinator.data.clean_speed,
-            CLEAN_SPEED_LABELS,
-            (2,),  # Vacuum Only
+            ROUTE_LABELS,
         ),
         attrs_fn=lambda coordinator: _raw_value_attr(
             "clean_speed",
@@ -406,9 +392,9 @@ SENSORS: tuple[DjiRomoSensorDescription, ...] = (
         device_class=SensorDeviceClass.DURATION,
         icon="mdi:timer-outline",
         # 0 (not unknown) when no clean is in progress.
-        value_fn=lambda coordinator: _seconds_to_minutes(
-            coordinator.data.clean_duration_s
-        ) or 0,
+        value_fn=lambda coordinator: (
+            _seconds_to_minutes(coordinator.data.clean_duration_s) or 0
+        ),
     ),
     DjiRomoSensorDescription(
         key="clean_time_remaining",
@@ -417,9 +403,9 @@ SENSORS: tuple[DjiRomoSensorDescription, ...] = (
         device_class=SensorDeviceClass.DURATION,
         icon="mdi:timer-sand",
         # 0 (not unknown) when no clean is in progress.
-        value_fn=lambda coordinator: _seconds_to_minutes(
-            coordinator.data.clean_remaining_s
-        ) or 0,
+        value_fn=lambda coordinator: (
+            _seconds_to_minutes(coordinator.data.clean_remaining_s) or 0
+        ),
     ),
     # --- Group B: stats of the most recent finished job ---
     DjiRomoSensorDescription(
@@ -500,7 +486,9 @@ async def async_setup_entry(
 ) -> None:
     """Set up Romo sensors."""
     coordinator = entry.runtime_data
-    async_add_entities(DjiRomoSensor(coordinator, description) for description in SENSORS)
+    async_add_entities(
+        DjiRomoSensor(coordinator, description) for description in SENSORS
+    )
 
 
 class DjiRomoSensor(DjiRomoCoordinatorEntity, RestoreSensor):
