@@ -351,6 +351,8 @@ async def _validate_user_input(
     if requested_sn is not None:
         try:
             device = await client.async_resolve_device(requested_sn)
+        except DjiRomoAuthError:
+            raise
         except DjiRomoApiError:
             # Some accounts/regions do not expose a usable homes endpoint yet.
             # If the user already knows the serial number, allow setup to continue.
@@ -367,6 +369,8 @@ async def _validate_user_input(
     else:
         try:
             device = await client.async_resolve_device(None)
+        except DjiRomoAuthError:
+            raise
         except DjiRomoApiError as err:
             raise CannotDiscoverDeviceError from err
         device_sn = device["sn"]
@@ -405,6 +409,8 @@ async def _discover_device_nickname(
     )
     try:
         properties = await client.async_get_properties()
+    except DjiRomoAuthError:
+        raise
     except DjiRomoApiError:
         return None
     base = properties.get("device_base_info", {})

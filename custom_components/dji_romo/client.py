@@ -7,6 +7,7 @@ import base64
 import json
 import logging
 import struct
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -467,30 +468,42 @@ class DjiRomoApiClient:
         """Start a cleaning job from a DJI Home shortcut."""
         plan_configs = shortcut.get("plan_area_configs", [])
         room_map = shortcut.get("room_map", {})
-        if not plan_configs:
-            raise DjiRomoApiError("The DJI Home cleaning shortcut has no room config.")
+        if (
+            not isinstance(plan_configs, list)
+            or not plan_configs
+            or any(not isinstance(config, dict) for config in plan_configs)
+        ):
+            raise DjiRomoApiError(
+                "The DJI Home cleaning shortcut has no valid area config."
+            )
+        if not isinstance(room_map, dict):
+            raise DjiRomoApiError(
+                "The DJI Home cleaning shortcut has invalid map data."
+            )
 
         area_configs = []
         for config in plan_configs:
             area_configs.append(
                 {
-                    "config_uuid": str(uuid4()),
-                    "clean_mode": config.get("clean_mode", 2),
-                    "fan_speed": config.get("fan_speed", 2),
-                    "water_level": config.get("water_level", 2),
-                    "clean_num": config.get("clean_num", 1),
-                    "storm_mode": config.get("storm_mode", 0),
-                    "secondary_clean_num": config.get("secondary_clean_num", 1),
-                    "clean_speed": config.get("clean_speed", 0),
-                    "order_id": config.get("order_id", 1),
-                    "poly_type": config.get("poly_type", 2),
-                    "poly_index": config.get("poly_index", 0),
-                    "poly_label": config.get("poly_label", 0),
-                    "user_label": config.get("user_label", 0),
-                    "poly_name_index": config.get("poly_name_index", 0),
+                    "clean_mode": 2,
+                    "fan_speed": 2,
+                    "water_level": 2,
+                    "clean_num": 1,
+                    "storm_mode": 0,
+                    "secondary_clean_num": 1,
+                    "clean_speed": 0,
+                    "order_id": 1,
+                    "poly_type": 2,
+                    "poly_index": 0,
+                    "poly_label": 0,
+                    "user_label": 0,
+                    "poly_name_index": 0,
                     "skip_area": 0,
-                    "floor_cleaner_type": config.get("floor_cleaner_type", 0),
-                    "repeat_mop": config.get("repeat_mop", False),
+                    "floor_cleaner_type": 0,
+                    "repeat_mop": False,
+                    # Drawn areas carry geometry beyond the room-cleaning fields.
+                    **deepcopy(config),
+                    "config_uuid": str(uuid4()),
                 }
             )
 
@@ -508,10 +521,11 @@ class DjiRomoApiClient:
                 "is_valid": True,
                 "plan_area_configs": area_configs,
                 "room_map": {
-                    "map_index": room_map.get("map_index", 0),
-                    "map_version": room_map.get("map_version", 0),
-                    "file_id": room_map.get("file_id", ""),
-                    "slot_id": room_map.get("slot_id", 0),
+                    "map_index": 0,
+                    "map_version": 0,
+                    "file_id": "",
+                    "slot_id": 0,
+                    **deepcopy(room_map),
                 },
                 "area_config_type": shortcut.get("area_config_type", 0),
             },

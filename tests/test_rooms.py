@@ -54,3 +54,24 @@ def test_rooms_are_sorted_when_order_ids_are_strings() -> None:
     entries = list(room_configs_from_shortcuts(shortcuts))
 
     assert [entry[0]["poly_index"] for entry in entries] == [1, 2]
+
+
+def test_drawn_area_does_not_replace_room_with_same_index() -> None:
+    """A mixed preset must not turn a per-room button into an area command."""
+    shortcuts = [
+        {
+            "room_map": {
+                "device_map_rooms": [{"poly_index": 1, "custom_name": "Kitchen"}]
+            },
+            "plan_area_configs": [
+                {"poly_index": 1, "poly_type": 2, "fan_speed": 3},
+                {"poly_index": 1, "poly_type": 1, "fan_speed": 1, "vertices": []},
+            ],
+        }
+    ]
+
+    config, _room_map, _duplicates = list(room_configs_from_shortcuts(shortcuts))[0]
+
+    assert config["poly_type"] == 2
+    assert config["fan_speed"] == 3
+    assert "vertices" not in config
