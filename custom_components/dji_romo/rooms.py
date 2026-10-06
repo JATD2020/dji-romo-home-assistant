@@ -53,7 +53,7 @@ def room_configs_from_shortcuts(
     configs = {
         config.get("poly_index"): config
         for config in template.get("plan_area_configs", [])
-        if config.get("poly_index") is not None
+        if config.get("poly_index") is not None and config.get("poly_type", 2) == 2
     }
     all_configs: list[dict[str, Any]] = []
     for index, room in enumerate(sorted(rooms, key=_room_sort_key), start=1):

@@ -55,6 +55,9 @@ The integration creates one button per room reported by DJI Home. To clean sever
 rooms in one job, call `dji_romo.clean_rooms` for the vacuum entity and pass the
 room names in the desired order.
 
+All room names are checked before starting. If any room cannot be found, the
+action reports the missing names and the robot stays idle.
+
 Room buttons use the shared room-cleaning controls exposed by the integration:
 
 - Cleaning mode: vacuum and mop, vacuum only, mop only, or vacuum then mop

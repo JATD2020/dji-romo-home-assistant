@@ -1103,8 +1103,8 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
     async def async_clean_rooms_by_name(self, names: list[str]) -> list[str]:
         """Start a multi-room clean for the given room names.
 
-        Returns the list of names that were not found so the caller can report
-        them. Room settings come from the shared HA cleaning options.
+        If any name is missing, return those names without starting a partial job.
+        Room settings come from the shared HA cleaning options.
         """
         try:
             shortcuts = await self.api.async_get_shortcuts()
@@ -1132,6 +1132,8 @@ class DjiRomoCoordinator(DataUpdateCoordinator[RomoSnapshot]):
             selected.append(self.room_cleaning_config(match[0]))
             ordered_names.append(name.strip())
 
+        if missing:
+            return missing
         if not selected:
             raise UpdateFailed(
                 f"None of the requested rooms were found: {', '.join(names)}"
